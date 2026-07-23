@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="2.7.0"
+readonly MANAGER_VERSION="3.0.0"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -519,14 +519,14 @@ test_upstream_connection() {
   if http_status="$(curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
       -w '%{http_code}' "$upstream_scheme://$formatted_host:$upstream_port/")"; then
     if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
-      success "已连通上游服务（HTTP $http_status，需要认证或无访问权限）。"
+      success "已连通后端服务（HTTP $http_status，需要认证或无访问权限）。"
     else
-      success "已连通上游服务（HTTP $http_status）。"
+      success "已连通后端服务（HTTP $http_status）。"
     fi
     return 0
   fi
 
-  warn "宿主机无法连接 $upstream_scheme://$formatted_host:$upstream_port，配置后会出现 502。"
+  warn "宿主机无法连接后端服务 $upstream_scheme://$formatted_host:$upstream_port，配置后会出现 502。"
   if [[ "$upstream_host" == "127.0.0.1" || "$upstream_host" == "::1" ]]; then
     info "127.0.0.1 仅能访问发布到回环接口或所有接口的端口；若 Docker 端口绑定到服务器具体 IP，请填写该 IP。"
   fi
@@ -546,7 +546,7 @@ save_proxy_config() {
     return 1
   fi
   if ! is_valid_upstream_host "$upstream_host"; then
-    error "上游 IP/主机名格式不正确。"
+    error "后端服务地址格式不正确。"
     return 1
   fi
   if ! is_valid_port "$upstream_port"; then
@@ -554,7 +554,7 @@ save_proxy_config() {
     return 1
   fi
   if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
-    error "上游协议只能是 http 或 https。"
+    error "后端服务协议只能是 http 或 https。"
     return 1
   fi
 
@@ -595,8 +595,8 @@ EOF
   fi
 
   rm -f -- "$rollback_file"
-  success "已配置：https://$domain -> $upstream_scheme://$formatted_host:$upstream_port"
-  info "若上游是 Docker 容器，建议端口映射为 127.0.0.1:${upstream_port}:容器内部端口。"
+  success "已配置：https://$domain -> 后端服务 $upstream_scheme://$formatted_host:$upstream_port"
+  info "若后端服务运行在 Docker 容器中，建议端口映射为 127.0.0.1:${upstream_port}:容器内部端口。"
 }
 
 configure_manual_proxy() {
@@ -610,24 +610,24 @@ configure_manual_proxy() {
     return 1
   fi
 
-  read -r -p "2. 上游地址（Docker 通常填 127.0.0.1；其他服务填实际监听地址）：" upstream_host
+  read -r -p "2. 后端服务地址（Docker 通常填 127.0.0.1；其他服务填实际监听地址）：" upstream_host
   upstream_host="${upstream_host#[}"
   upstream_host="${upstream_host%]}"
   if ! is_valid_upstream_host "$upstream_host"; then
-    error "上游 IP/主机名格式不正确。"
+    error "后端服务地址格式不正确。"
     return 1
   fi
 
-  read -r -p "3. 上游端口（例如 8080）：" upstream_port
+  read -r -p "3. 后端服务端口（例如 8080）：" upstream_port
   if ! is_valid_port "$upstream_port"; then
     error "端口必须是 1-65535 之间的整数。"
     return 1
   fi
 
-  read -r -p "4. 上游协议 [http/https，默认 http]：" upstream_scheme
+  read -r -p "4. 后端服务协议 [http/https，默认 http]：" upstream_scheme
   upstream_scheme="${upstream_scheme:-http}"
   if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
-    error "上游协议只能是 http 或 https。"
+    error "后端服务协议只能是 http 或 https。"
     return 1
   fi
 
@@ -751,10 +751,10 @@ configure_docker_proxy() {
     return 1
   fi
 
-  read -r -p "4. 上游协议 [http/https，默认 http]：" upstream_scheme
+  read -r -p "4. 后端服务协议 [http/https，默认 http]：" upstream_scheme
   upstream_scheme="${upstream_scheme:-http}"
   if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
-    error "上游协议只能是 http 或 https。"
+    error "后端服务协议只能是 http 或 https。"
     return 1
   fi
 
@@ -771,7 +771,7 @@ configure_proxy() {
     return 1
   fi
 
-  printf '\n%s请选择上游服务类型%s\n' "$BOLD" "$RESET"
+  printf '\n%s请选择后端服务类型%s\n' "$BOLD" "$RESET"
   printf '  1. 手动填写服务地址和端口\n'
   printf '  2. Docker 容器连接向导（仅适用于 Docker 容器）\n'
   printf '  0. 返回\n'
@@ -838,7 +838,7 @@ edit_proxy_config() {
     return 0
   fi
 
-  printf '\n可修改的站点（域名 -> 当前上游）：\n'
+  printf '\n可修改的站点（域名 -> 当前后端服务）：\n'
   show_site_choices
   read -r -p "输入需要修改的完整域名：" domain
   domain="${domain,,}"
@@ -853,32 +853,32 @@ edit_proxy_config() {
     return 1
   fi
   settings="$(read_proxy_settings "$target")" || {
-    error "无法识别该站点的上游地址；仅支持本工具生成的 reverse_proxy http(s)://主机:端口 配置。"
+    error "无法识别该站点的后端服务地址；仅支持本工具生成的 reverse_proxy http(s)://主机:端口 配置。"
     return 1
   }
   IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
 
-  printf '\n当前上游：%s://%s:%s\n' "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
-  read -r -p "1. 上游 IP/主机名 [$upstream_host]：" updated_host
+  printf '\n当前后端服务：%s://%s:%s\n' "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
+  read -r -p "1. 后端服务地址 [$upstream_host]：" updated_host
   updated_host="${updated_host:-$upstream_host}"
   updated_host="${updated_host#[}"
   updated_host="${updated_host%]}"
   if ! is_valid_upstream_host "$updated_host"; then
-    error "上游 IP/主机名格式不正确。"
+    error "后端服务地址格式不正确。"
     return 1
   fi
 
-  read -r -p "2. 上游端口 [$upstream_port]：" updated_port
+  read -r -p "2. 后端服务端口 [$upstream_port]：" updated_port
   updated_port="${updated_port:-$upstream_port}"
   if ! is_valid_port "$updated_port"; then
     error "端口必须是 1-65535 之间的整数。"
     return 1
   fi
 
-  read -r -p "3. 上游协议 [http/https，当前 $upstream_scheme]：" updated_scheme
+  read -r -p "3. 后端服务协议 [http/https，当前 $upstream_scheme]：" updated_scheme
   updated_scheme="${updated_scheme:-$upstream_scheme}"
   if [[ "$updated_scheme" != "http" && "$updated_scheme" != "https" ]]; then
-    error "上游协议只能是 http 或 https。"
+    error "后端服务协议只能是 http 或 https。"
     return 1
   fi
 
@@ -918,9 +918,9 @@ show_config() {
   fi
 
   if compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
-    printf '\n已配置站点（域名 -> 上游）：\n'
+    printf '\n已配置站点（域名 -> 后端服务）：\n'
     show_site_choices
-    printf '\n提示：使用“修改现有反向代理”更新上游，使用“删除反向代理”移除站点。\n'
+    printf '\n提示：使用“修改现有反向代理”更新后端服务，使用“删除反向代理”移除站点。\n'
   else
     warn "暂未配置反向代理站点。"
   fi
@@ -962,61 +962,14 @@ show_local_listener() {
   fi
 }
 
-diagnose_upstream() {
-  local mode domain target settings upstream_scheme upstream_host upstream_port
+diagnose_upstream_target() {
+  local label="$1"
+  local upstream_scheme="$2"
+  local upstream_host="$3"
+  local upstream_port="$4"
 
-  printf '\n%s检测上游监听与连通性%s\n' "$BOLD" "$RESET"
-  printf '  1. 检测已配置的反向代理\n'
-  printf '  2. 手动填写上游地址和端口\n'
-  printf '  0. 返回\n'
-  read -r -p "请选择 [0-2]：" mode
-
-  case "$mode" in
-    1)
-      if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
-        warn "暂未配置反向代理站点。"
-        return 0
-      fi
-      printf '\n已配置站点（域名 -> 上游）：\n'
-      show_site_choices
-      read -r -p "输入需要检测的完整域名：" domain
-      domain="${domain,,}"
-      if ! is_valid_domain "$domain"; then
-        error "域名格式不正确。"
-        return 1
-      fi
-      target="$(site_path_for_domain "$domain")"
-      settings="$(read_proxy_settings "$target")" || {
-        error "无法识别该站点的上游地址；请改用手动检测。"
-        return 1
-      }
-      IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
-      ;;
-    2)
-      read -r -p "上游地址（IP 或主机名）：" upstream_host
-      upstream_host="${upstream_host#[}"
-      upstream_host="${upstream_host%]}"
-      if ! is_valid_upstream_host "$upstream_host"; then
-        error "上游 IP/主机名格式不正确。"
-        return 1
-      fi
-      read -r -p "上游端口：" upstream_port
-      if ! is_valid_port "$upstream_port"; then
-        error "端口必须是 1-65535 之间的整数。"
-        return 1
-      fi
-      read -r -p "上游协议 [http/https，默认 http]：" upstream_scheme
-      upstream_scheme="${upstream_scheme:-http}"
-      if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
-        error "上游协议只能是 http 或 https。"
-        return 1
-      fi
-      ;;
-    0) return 0 ;;
-    *) error "无效选项：$mode"; return 1 ;;
-  esac
-
-  printf '\n检测目标：%s://%s:%s\n' \
+  printf '\n%s%s%s\n' "$BOLD" "$label" "$RESET"
+  printf '后端服务地址：%s://%s:%s\n' \
     "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
   if is_local_upstream_host "$upstream_host"; then
     show_local_listener "$upstream_port"
@@ -1026,6 +979,70 @@ diagnose_upstream() {
 
   printf '\n%sHTTP/HTTPS 连通性%s\n' "$BOLD" "$RESET"
   test_upstream_connection "$upstream_host" "$upstream_port" "$upstream_scheme" || true
+}
+
+diagnose_configured_upstreams() {
+  local site domain settings upstream_scheme upstream_host upstream_port
+
+  if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
+    warn "暂未配置反向代理站点。"
+    return 0
+  fi
+
+  printf '\n正在自动检测全部已配置站点：\n'
+  for site in "$SITES_DIR"/*.caddy; do
+    domain="${site##*/}"
+    domain="${domain%.caddy}"
+    settings="$(read_proxy_settings "$site" || true)"
+    if [[ -z "$settings" ]]; then
+      warn "$domain 使用自定义 Caddy 配置，无法自动读取后端服务地址。"
+      continue
+    fi
+    IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
+    diagnose_upstream_target "站点：$domain" "$upstream_scheme" "$upstream_host" "$upstream_port"
+  done
+}
+
+diagnose_upstream() {
+  local mode upstream_scheme upstream_host upstream_port
+
+  printf '\n%s检测后端服务监听与连通性%s\n' "$BOLD" "$RESET"
+  info "后端服务是 Caddy 转发请求的实际应用，例如 Kopia 的 127.0.0.1:41515。"
+  printf '  1. 自动检测全部已配置的反向代理\n'
+  printf '  2. 手动检测未配置的服务地址\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-2]：" mode
+
+  case "$mode" in
+    1)
+      diagnose_configured_upstreams
+      return
+      ;;
+    2)
+      read -r -p "后端服务地址（IP 或主机名）：" upstream_host
+      upstream_host="${upstream_host#[}"
+      upstream_host="${upstream_host%]}"
+      if ! is_valid_upstream_host "$upstream_host"; then
+        error "后端服务地址格式不正确。"
+        return 1
+      fi
+      read -r -p "后端服务端口：" upstream_port
+      if ! is_valid_port "$upstream_port"; then
+        error "端口必须是 1-65535 之间的整数。"
+        return 1
+      fi
+      read -r -p "后端服务协议 [http/https，默认 http]：" upstream_scheme
+      upstream_scheme="${upstream_scheme:-http}"
+      if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
+        error "后端服务协议只能是 http 或 https。"
+        return 1
+      fi
+      ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+
+  diagnose_upstream_target "手动检测服务" "$upstream_scheme" "$upstream_host" "$upstream_port"
 }
 
 kopia_listener_details() {
@@ -1073,7 +1090,7 @@ show_kopia_binding_plan() {
   printf '  kopia server start --address=%s:%s\n' "$(format_upstream_host "$bind_host")" "$port"
   printf '\n'
   if [[ "$bind_host" == "127.0.0.1" ]]; then
-    info "应用此方案后，请在“修改现有反向代理”中将上游地址设为 127.0.0.1。"
+    info "应用此方案后，请在“修改现有反向代理”中将后端服务地址设为 127.0.0.1。"
   fi
 
   service_unit="$(find_kopia_service_unit)"
@@ -1089,10 +1106,10 @@ show_kopia_binding_plan() {
 kopia_safe_assistant() {
   local mode domain target settings upstream_scheme upstream_host upstream_port listener
 
-  printf '\n%s受支持服务安全助手：Kopia%s\n' "$BOLD" "$RESET"
-  info "此功能仅生成安全的监听地址调整方案，不会自动修改第三方服务。"
-  printf '  1. 从已配置的反向代理选择 Kopia 上游\n'
-  printf '  2. 手动填写 Kopia 上游地址和端口\n'
+  printf '\n%sKopia 监听配置助手（预览）%s\n' "$BOLD" "$RESET"
+  info "识别本机 Kopia 进程后生成监听地址方案；不会自动修改或重启 Kopia。"
+  printf '  1. 从已配置反向代理选择 Kopia 后端服务\n'
+  printf '  2. 手动填写 Kopia 后端服务地址和端口\n'
   printf '  0. 返回\n'
   read -r -p "请选择 [0-2]：" mode
 
@@ -1102,7 +1119,7 @@ kopia_safe_assistant() {
         warn "暂未配置反向代理站点。"
         return 0
       fi
-      printf '\n已配置站点（域名 -> 上游）：\n'
+      printf '\n已配置站点（域名 -> 后端服务）：\n'
       show_site_choices
       read -r -p "输入对应 Kopia 站点的完整域名：" domain
       domain="${domain,,}"
@@ -1112,20 +1129,20 @@ kopia_safe_assistant() {
       fi
       target="$(site_path_for_domain "$domain")"
       settings="$(read_proxy_settings "$target")" || {
-        error "无法识别该站点的上游地址；请改用手动填写。"
+        error "无法识别该站点的后端服务地址；请改用手动填写。"
         return 1
       }
       IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
       ;;
     2)
-      read -r -p "Kopia 上游地址（必须是本机 IP）：" upstream_host
+      read -r -p "Kopia 后端服务地址（必须是本机 IP）：" upstream_host
       upstream_host="${upstream_host#[}"
       upstream_host="${upstream_host%]}"
       if ! is_valid_upstream_host "$upstream_host"; then
-        error "上游 IP/主机名格式不正确。"
+        error "后端服务地址格式不正确。"
         return 1
       fi
-      read -r -p "Kopia 上游端口：" upstream_port
+      read -r -p "Kopia 后端服务端口：" upstream_port
       if ! is_valid_port "$upstream_port"; then
         error "端口必须是 1-65535 之间的整数。"
         return 1
@@ -1165,7 +1182,7 @@ delete_proxy() {
     return 0
   fi
 
-  printf '\n可删除的站点（域名 -> 当前上游）：\n'
+  printf '\n可删除的站点（域名 -> 当前后端服务）：\n'
   show_site_choices
   read -r -p "输入需要删除的完整域名：" domain
   domain="${domain,,}"
@@ -1287,18 +1304,44 @@ draw_menu() {
   printf '  9. 校验并重载 Caddy\n'
   printf ' 10. 查看 Caddy 服务日志\n'
   printf ' 11. 查看端口监听与 Docker 映射\n'
-  printf ' 12. 检测上游监听与连通性\n'
-  printf ' 13. 受支持服务安全助手（Kopia）\n'
+  printf ' 12. 检测后端服务监听与连通性\n'
+  printf ' 13. Kopia 监听配置助手（预览）\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
 }
 
 show_status_detail() {
+  local active enabled pid started answer
+
+  printf '\n%sCaddy 运行状态详情%s\n' "$BOLD" "$RESET"
   status_line
-  printf '\n'
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl status caddy --no-pager -l 2>/dev/null || true
+  printf '\n配置文件：%s\n' "$CADDYFILE"
+  printf '站点配置目录：%s\n' "$SITES_DIR"
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "当前系统未提供 systemctl，无法读取更多服务详情。"
+    return 0
   fi
+
+  active="$(systemctl is-active caddy 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled caddy 2>/dev/null || true)"
+  pid="$(systemctl show caddy --property=MainPID --value 2>/dev/null || true)"
+  started="$(systemctl show caddy --property=ActiveEnterTimestamp --value 2>/dev/null || true)"
+
+  case "$active" in
+    active) printf '服务状态：正常运行\n' ;;
+    inactive) printf '服务状态：未运行\n' ;;
+    failed) printf '服务状态：启动失败\n' ;;
+    *) printf '服务状态：%s\n' "${active:-未知}" ;;
+  esac
+  [[ "$enabled" == "enabled" ]] && printf '开机启动：已启用\n' || printf '开机启动：未启用\n'
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] && printf '主进程 PID：%s\n' "$pid"
+  [[ -n "$started" && "$started" != "n/a" ]] && printf '本次启动时间：%s\n' "$started"
+
+  read -r -p "是否查看原始 systemd 服务详情？[y/N]：" answer
+  [[ "$answer" =~ ^[Yy]$ ]] || return 0
+  printf '\n%s原始 systemd 服务详情%s\n' "$BOLD" "$RESET"
+  systemctl status caddy --no-pager -l 2>/dev/null || true
 }
 
 main_menu() {

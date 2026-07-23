@@ -25,4 +25,11 @@ download_manager() {
 
 download_manager
 chmod 0755 "$MANAGER_SCRIPT"
-bash "$MANAGER_SCRIPT" --install-manager
+
+if [[ ! -r /dev/tty ]]; then
+  printf '未检测到可交互终端，无法打开 CaddyCtl 菜单。请在 SSH 终端中运行此命令。\n' >&2
+  exit 1
+fi
+
+# `curl | bash` consumes standard input, so hand menu input back to the terminal.
+bash "$MANAGER_SCRIPT" --install-manager </dev/tty
