@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.4"
+readonly MANAGER_VERSION="3.3.5"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -158,13 +158,33 @@ WRAPPER
   chmod 0755 "$MANAGER_COMMAND"
 }
 
+cache_busted_github_raw_url() {
+  local source_url="$1"
+  local separator
+
+  case "$source_url" in
+    https://raw.githubusercontent.com/*)
+      [[ "$source_url" == *\?* ]] && separator="&" || separator="?"
+      printf '%s%scaddyctl_cache_bust=%s-%s-%s\n' "$source_url" "$separator" "$(date +%s)" "$$" "$RANDOM"
+      ;;
+    *) printf '%s\n' "$source_url" ;;
+  esac
+}
+
 download_manager_script() {
   local destination="$1"
+  local source_url
+
+  source_url="$(cache_busted_github_raw_url "$MANAGER_SOURCE_URL")"
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' --tlsv1.2 "$MANAGER_SOURCE_URL" -o "$destination"
+    curl -fsSL --proto '=https' --tlsv1.2 \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$source_url" -o "$destination"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$destination" "$MANAGER_SOURCE_URL"
+    wget -qO "$destination" \
+      --header='Cache-Control: no-cache' --header='Pragma: no-cache' \
+      "$source_url"
   else
     error "需要 curl 或 wget 才能下载 CaddyCtl 更新。"
     return 1

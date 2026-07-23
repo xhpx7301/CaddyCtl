@@ -12,11 +12,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
+cache_busted_github_raw_url() {
+  local source_url="$1"
+  local separator
+
+  case "$source_url" in
+    https://raw.githubusercontent.com/*)
+      [[ "$source_url" == *\?* ]] && separator="&" || separator="?"
+      printf '%s%scaddyctl_cache_bust=%s-%s-%s\n' "$source_url" "$separator" "$(date +%s)" "$$" "$RANDOM"
+      ;;
+    *) printf '%s\n' "$source_url" ;;
+  esac
+}
+
 download_manager() {
+  local download_url
+
+  download_url="$(cache_busted_github_raw_url "$SOURCE_URL")"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' --tlsv1.2 "$SOURCE_URL" -o "$MANAGER_SCRIPT"
+    curl -fsSL --proto '=https' --tlsv1.2 \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "$download_url" -o "$MANAGER_SCRIPT"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$MANAGER_SCRIPT" "$SOURCE_URL"
+    wget -qO "$MANAGER_SCRIPT" \
+      --header='Cache-Control: no-cache' --header='Pragma: no-cache' \
+      "$download_url"
   else
     printf '需要 curl 或 wget 才能下载安装程序。\n' >&2
     exit 1
