@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.1.0"
+readonly MANAGER_VERSION="3.2.0"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1059,130 +1059,6 @@ diagnose_upstream() {
   diagnose_upstream_target "手动检测服务" "$upstream_scheme" "$upstream_host" "$upstream_port"
 }
 
-kopia_listener_details() {
-  local port="$1"
-
-  command -v ss >/dev/null 2>&1 || return 1
-  ss -ltnpH "sport = :$port" 2>/dev/null | grep -i 'kopia' || true
-}
-
-find_kopia_service_unit() {
-  command -v systemctl >/dev/null 2>&1 || return 0
-  systemctl list-units --type=service --all --no-legend 'kopia*' 2>/dev/null \
-    | awk 'NF { print $1; exit }'
-}
-
-show_kopia_binding_plan() {
-  local port="$1"
-  local mode bind_host service_unit
-
-  printf '\n%sKopia 监听地址方案（仅预览）%s\n' "$BOLD" "$RESET"
-  printf '  1. 仅本机访问：127.0.0.1:%s（推荐由 Caddy 反向代理）\n' "$port"
-  printf '  2. 仅指定服务器 IP 访问\n'
-  printf '  3. 所有 IPv4 地址：0.0.0.0:%s（需配合防火墙）\n' "$port"
-  printf '  0. 返回\n'
-  read -r -p "请选择 [0-3]：" mode
-
-  case "$mode" in
-    1) bind_host="127.0.0.1" ;;
-    2)
-      read -r -p "输入本机要监听的 IP：" bind_host
-      if ! is_local_upstream_host "$bind_host" || [[ "$bind_host" == "127.0.0.1" || "$bind_host" == "::1" ]]; then
-        error "请输入服务器实际配置的非回环 IP。"
-        return 1
-      fi
-      ;;
-    3)
-      bind_host="0.0.0.0"
-      warn "所有 IPv4 地址均可直接访问该端口，请限制防火墙来源。"
-      ;;
-    0) return 0 ;;
-    *) error "无效选项：$mode"; return 1 ;;
-  esac
-
-  printf '\n建议的 Kopia 启动参数：\n\n'
-  printf '  kopia server start --address=%s:%s\n' "$(format_upstream_host "$bind_host")" "$port"
-  printf '\n'
-  if [[ "$bind_host" == "127.0.0.1" ]]; then
-    info "应用此方案后，请在“修改现有反向代理”中将后端服务地址设为 127.0.0.1。"
-  fi
-
-  service_unit="$(find_kopia_service_unit)"
-  if [[ -n "$service_unit" ]]; then
-    info "检测到 systemd 服务：$service_unit"
-    info "请通过 systemctl edit $service_unit 创建覆盖配置，并保留原有 Kopia 启动参数。"
-  else
-    info "未检测到名为 kopia 的 systemd 服务；请在当前 Kopia 的启动脚本、面板或服务配置中更新监听参数。"
-  fi
-  warn "此助手不会自动修改或重启 Kopia，避免覆盖认证、仓库路径等现有启动参数。"
-}
-
-kopia_safe_assistant() {
-  local mode domain target settings upstream_scheme upstream_host upstream_port listener
-
-  printf '\n%sKopia 监听配置助手（预览）%s\n' "$BOLD" "$RESET"
-  info "识别本机 Kopia 进程后生成监听地址方案；不会自动修改或重启 Kopia。"
-  printf '  1. 从已配置反向代理选择 Kopia 后端服务\n'
-  printf '  2. 手动填写 Kopia 后端服务地址和端口\n'
-  printf '  0. 返回\n'
-  read -r -p "请选择 [0-2]：" mode
-
-  case "$mode" in
-    1)
-      if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
-        warn "暂未配置反向代理站点。"
-        return 0
-      fi
-      printf '\n已配置站点（域名 -> 后端服务）：\n'
-      show_site_choices
-      read -r -p "输入对应 Kopia 站点的完整域名：" domain
-      domain="${domain,,}"
-      if ! is_valid_domain "$domain"; then
-        error "域名格式不正确。"
-        return 1
-      fi
-      target="$(site_path_for_domain "$domain")"
-      settings="$(read_proxy_settings "$target")" || {
-        error "无法识别该站点的后端服务地址；请改用手动填写。"
-        return 1
-      }
-      IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
-      ;;
-    2)
-      read -r -p "Kopia 后端服务地址（必须是本机 IP）：" upstream_host
-      upstream_host="${upstream_host#[}"
-      upstream_host="${upstream_host%]}"
-      if ! is_valid_upstream_host "$upstream_host"; then
-        error "后端服务地址格式不正确。"
-        return 1
-      fi
-      read -r -p "Kopia 后端服务端口：" upstream_port
-      if ! is_valid_port "$upstream_port"; then
-        error "端口必须是 1-65535 之间的整数。"
-        return 1
-      fi
-      ;;
-    0) return 0 ;;
-    *) error "无效选项：$mode"; return 1 ;;
-  esac
-
-  listener="$(kopia_listener_details "$upstream_port")"
-  if [[ -z "$listener" ]]; then
-    warn "未在本机端口 $upstream_port 识别到 Kopia 监听进程。"
-    show_local_listener "$upstream_port"
-    info "请确认端口和服务名称；若填写的是云公网 IP，请先确认该端口在本机确实由 Kopia 监听。"
-    return 1
-  fi
-
-  if ! is_local_upstream_host "$upstream_host"; then
-    warn "$upstream_host 未出现在本机网卡地址中，可能是云服务器公网 IP 映射；将使用已识别的本机 Kopia 进程生成方案。"
-  fi
-
-  success "已识别 Kopia 监听进程："
-  printf '%s\n' "$listener"
-  show_kopia_binding_plan "$upstream_port"
-}
-
 show_all_local_listeners() {
   printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
@@ -1195,22 +1071,187 @@ show_all_local_listeners() {
   fi
 }
 
-local_service_listener_assistant() {
-  local mode
+listener_pid_from_details() {
+  sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1
+}
 
-  printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
-  info "先查看本机服务的监听地址和进程；Kopia 子功能仅生成安全修改方案。"
-  printf '  1. 查看全部本机 TCP 服务监听地址\n'
-  printf '  2. Kopia 监听地址调整方案（预览）\n'
+listener_process_from_details() {
+  sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n 1
+}
+
+systemd_unit_for_pid() {
+  local pid="$1"
+
+  [[ -r "/proc/$pid/cgroup" ]] || return 1
+  awk -F/ '{for (i = NF; i > 0; i--) if ($i ~ /\.service$/) { print $i; exit }}' \
+    "/proc/$pid/cgroup"
+}
+
+apply_kopia_listener_address() {
+  local pid="$1"
+  local port="$2"
+  local bind_host="$3"
+  local unit wrapper_dir wrapper_path override_dir override_path
+  local previous_wrapper="" previous_override="" had_wrapper="false" had_override="false"
+  local temp_wrapper temp_override arg
+  local -a command filtered
+  local i has_server="false" has_start="false"
+
+  unit="$(systemd_unit_for_pid "$pid")"
+  if [[ -z "$unit" || ! "$unit" =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
+    error "未找到 Kopia 对应的 systemd 服务，无法安全自动修改。"
+    return 1
+  fi
+  case "$(systemctl show "$unit" --property=Type --value 2>/dev/null)" in
+    simple|exec) ;;
+    *)
+      error "仅支持 Type=simple 或 Type=exec 的 systemd Kopia 服务，当前服务类型不支持自动修改。"
+      return 1
+      ;;
+  esac
+  if ! mapfile -d '' -t command < "/proc/$pid/cmdline" || [[ ${#command[@]} -eq 0 ]]; then
+    error "无法读取当前 Kopia 启动命令。"
+    return 1
+  fi
+  if [[ "$(basename "${command[0]}")" != "kopia" ]]; then
+    error "当前进程不是直接由 kopia 命令启动，无法安全自动修改。"
+    return 1
+  fi
+  for arg in "${command[@]}"; do
+    [[ "$arg" == "server" ]] && has_server="true"
+    [[ "$arg" == "start" ]] && has_start="true"
+  done
+  if [[ "$has_server" != "true" || "$has_start" != "true" ]]; then
+    error "当前 Kopia 命令不是 server start 模式，无法安全自动修改。"
+    return 1
+  fi
+
+  for ((i = 0; i < ${#command[@]}; i++)); do
+    arg="${command[$i]}"
+    if [[ "$arg" == "--address" ]]; then
+      ((i++))
+      continue
+    fi
+    [[ "$arg" == --address=* ]] && continue
+    filtered+=("$arg")
+  done
+  filtered+=("--address=${bind_host}:${port}")
+
+  wrapper_dir="${MANAGER_DIR}/service-wrappers"
+  wrapper_path="${wrapper_dir}/${unit}.sh"
+  override_dir="/etc/systemd/system/${unit}.d"
+  override_path="${override_dir}/caddyctl-listener.conf"
+  temp_wrapper="$(mktemp)" || return 1
+  temp_override="$(mktemp)" || { rm -f -- "$temp_wrapper"; return 1; }
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\nexec'
+    for arg in "${filtered[@]}"; do
+      printf ' %q' "$arg"
+    done
+    printf '\n'
+  } >"$temp_wrapper"
+  printf '[Service]\nExecStart=\nExecStart=%s\n' "$wrapper_path" >"$temp_override"
+
+  if [[ -f "$wrapper_path" ]]; then
+    had_wrapper="true"
+    previous_wrapper="$(mktemp)"
+    cp -a -- "$wrapper_path" "$previous_wrapper"
+    backup_file "$wrapper_path" "${unit}-listener-wrapper"
+  fi
+  if [[ -f "$override_path" ]]; then
+    had_override="true"
+    previous_override="$(mktemp)"
+    cp -a -- "$override_path" "$previous_override"
+    backup_file "$override_path" "${unit}-listener-override"
+  fi
+
+  install -d -m 0700 "$wrapper_dir" "$override_dir"
+  install -m 0700 "$temp_wrapper" "$wrapper_path"
+  install -m 0600 "$temp_override" "$override_path"
+  rm -f -- "$temp_wrapper" "$temp_override"
+  systemctl daemon-reload
+  if systemctl restart "$unit"; then
+    rm -f -- "$previous_wrapper" "$previous_override"
+    success "Kopia 监听地址已更新为 ${bind_host}:${port}。"
+    if [[ "$bind_host" == "127.0.0.1" ]]; then
+      info "请使用第 6 项检查对应站点，将后端服务地址同步改为 127.0.0.1。"
+    fi
+    show_local_listener "$port"
+    return 0
+  fi
+
+  error "Kopia 重启失败，正在恢复原有启动配置。"
+  if [[ "$had_wrapper" == "true" ]]; then
+    install -m 0700 "$previous_wrapper" "$wrapper_path"
+  else
+    rm -f -- "$wrapper_path"
+  fi
+  if [[ "$had_override" == "true" ]]; then
+    install -m 0600 "$previous_override" "$override_path"
+  else
+    rm -f -- "$override_path"
+  fi
+  rm -f -- "$previous_wrapper" "$previous_override"
+  systemctl daemon-reload
+  systemctl restart "$unit" >/dev/null 2>&1 || true
+  return 1
+}
+
+manage_kopia_listener() {
+  local port="$1"
+  local listener="$2"
+  local pid unit mode bind_host
+
+  pid="$(printf '%s\n' "$listener" | listener_pid_from_details)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || { error "无法识别 Kopia 进程 PID。"; return 1; }
+  unit="$(systemd_unit_for_pid "$pid")"
+  printf '\n%sKopia 监听地址修改%s\n' "$BOLD" "$RESET"
+  printf '当前监听：\n%s\n' "$listener"
+  printf '关联 systemd 服务：%s\n' "${unit:-未识别}"
+  printf '  1. 仅服务器本机：127.0.0.1:%s（推荐通过 Caddy 访问）\n' "$port"
+  printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s（需配合防火墙）\n' "$port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-2]：" mode
 
   case "$mode" in
-    1) show_all_local_listeners ;;
-    2) kopia_safe_assistant ;;
+    1) bind_host="127.0.0.1" ;;
+    2)
+      bind_host="0.0.0.0"
+      warn "此端口将接受所有 IPv4 网络接口的连接，请仅在防火墙允许可信来源。"
+      ;;
     0) return 0 ;;
     *) error "无效选项：$mode"; return 1 ;;
   esac
+
+  warn "将为 $unit 创建 CaddyCtl 管理的启动覆盖文件，并重启 Kopia 服务。"
+  confirm_action "确认修改 Kopia 监听地址为 ${bind_host}:${port}？" || { info "已取消。"; return 0; }
+  apply_kopia_listener_address "$pid" "$port" "$bind_host"
+}
+
+local_service_listener_assistant() {
+  local port listener process
+
+  printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
+  info "先列出本机服务，再输入需要查看或修改的端口。自动修改目前仅支持 systemd 启动的 Kopia。"
+  show_all_local_listeners
+  read -r -p "输入需要管理的 TCP 端口（直接回车返回）：" port
+  [[ -n "$port" ]] || return 0
+  if ! is_valid_port "$port"; then
+    error "端口必须是 1-65535 之间的整数。"
+    return 1
+  fi
+  listener="$(local_tcp_listener_details "$port")"
+  if [[ -z "$listener" ]]; then
+    warn "未发现 TCP 端口 $port 处于监听状态。"
+    return 0
+  fi
+  printf '\n%s端口 %s 的监听详情%s\n%s\n' "$BOLD" "$port" "$RESET" "$listener"
+  process="$(printf '%s\n' "$listener" | listener_process_from_details)"
+  if [[ "$process" == "kopia" ]]; then
+    manage_kopia_listener "$port" "$listener"
+  else
+    info "已识别进程：${process:-未知}。当前仅支持自动修改 systemd 启动的 Kopia；其他服务请在其自身配置中调整监听地址。"
+  fi
 }
 
 delete_proxy() {
