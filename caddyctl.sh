@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.6"
+readonly MANAGER_VERSION="3.3.7"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1171,6 +1171,48 @@ systemd_unit_for_pid() {
     "/proc/$pid/cgroup"
 }
 
+kopia_default_config_path_for_user() {
+  local user="$1"
+  local home_dir="$2"
+  local xdg_config_home="$3"
+  local config_root candidate
+
+  if [[ -z "$home_dir" ]]; then
+    home_dir="$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)"
+  fi
+  [[ -n "$home_dir" ]] || return 0
+  config_root="${xdg_config_home:-${home_dir}/.config}"
+  candidate="${config_root}/kopia/repository.config"
+  [[ -f "$candidate" ]] && printf '%s\n' "$candidate"
+}
+
+kopia_environment_exports() {
+  local pid="$1"
+  local environment_item name value
+  local run_user home_dir="" xdg_config_home="" config_path=""
+  local has_config_path="false"
+
+  [[ -r "/proc/$pid/environ" ]] || return 0
+  run_user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  while IFS= read -r -d '' environment_item; do
+    name="${environment_item%%=*}"
+    value="${environment_item#*=}"
+    case "$name" in
+      HOME) home_dir="$value" ;;
+      XDG_CONFIG_HOME) xdg_config_home="$value" ;;
+      KOPIA_CONFIG_PATH) has_config_path="true" ;;
+    esac
+    if [[ "$name" == "HOME" || "$name" == "XDG_CONFIG_HOME" || "$name" =~ ^KOPIA_[A-Za-z0-9_]+$ ]]; then
+      printf 'export %s=%q\n' "$name" "$value"
+    fi
+  done < "/proc/$pid/environ"
+
+  if [[ "$has_config_path" != "true" && -n "$run_user" ]]; then
+    config_path="$(kopia_default_config_path_for_user "$run_user" "$home_dir" "$xdg_config_home")"
+    [[ -n "$config_path" ]] && printf 'export KOPIA_CONFIG_PATH=%q\n' "$config_path"
+  fi
+}
+
 apply_kopia_listener_address() {
   local pid="$1"
   local port="$2"
@@ -1228,7 +1270,9 @@ apply_kopia_listener_address() {
   temp_wrapper="$(mktemp)" || return 1
   temp_override="$(mktemp)" || { rm -f -- "$temp_wrapper"; return 1; }
   {
-    printf '#!/usr/bin/env bash\nset -euo pipefail\nexec'
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    kopia_environment_exports "$pid"
+    printf 'exec'
     for arg in "${filtered[@]}"; do
       printf ' %q' "$arg"
     done
@@ -1288,8 +1332,8 @@ adopt_manual_kopia_service() {
   local unit_path="/etc/systemd/system/${unit}"
   local wrapper_dir="${MANAGER_DIR}/service-wrappers"
   local wrapper_path="${wrapper_dir}/${unit}.sh"
-  local run_user parent_pid kopia_config_path=""
-  local temp_wrapper temp_unit argument environment_item
+  local run_user parent_pid
+  local temp_wrapper temp_unit argument
   local -a command
   local i has_server="false" has_start="false"
 
@@ -1323,19 +1367,11 @@ adopt_manual_kopia_service() {
     error "Kopia 的父进程为 PID ${parent_pid:-未知}，可能仍受脚本或面板管理；请先在原管理器中停止它，再改用 systemd。"
     return 1
   fi
-  while IFS= read -r -d '' environment_item; do
-    [[ "$environment_item" == KOPIA_CONFIG_PATH=* ]] || continue
-    kopia_config_path="${environment_item#KOPIA_CONFIG_PATH=}"
-    break
-  done < "/proc/$pid/environ"
-
   temp_wrapper="$(mktemp)" || return 1
   temp_unit="$(mktemp)" || { rm -f -- "$temp_wrapper"; return 1; }
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    if [[ -n "$kopia_config_path" ]]; then
-      printf 'export KOPIA_CONFIG_PATH=%q\n' "$kopia_config_path"
-    fi
+    kopia_environment_exports "$pid"
     printf 'exec'
     for argument in "${command[@]}"; do
       printf ' %q' "$argument"
@@ -1352,9 +1388,7 @@ adopt_manual_kopia_service() {
   } >"$temp_unit"
 
   warn "将接管 PID ${pid} 的手工 Kopia 进程，保留当前启动参数并创建 ${unit}。"
-  if [[ -n "$kopia_config_path" ]]; then
-    info "已识别 KOPIA_CONFIG_PATH，将随服务保留。"
-  fi
+  info "将保留 HOME、XDG_CONFIG_HOME 以及 KOPIA_* 环境变量，并优先沿用原存储库配置。"
   confirm_action "确认停止当前手工进程并启用 ${unit}？" || {
     rm -f -- "$temp_wrapper" "$temp_unit"
     info "已取消。"
