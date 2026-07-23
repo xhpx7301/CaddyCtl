@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.5"
+readonly MANAGER_VERSION="3.3.6"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -238,7 +238,10 @@ update_manager() {
   fi
   rm -f -- "$temp_file"
   success "CaddyCtl 已更新：$current_version -> $updated_version"
-  info "更新将在下次打开 caddyctl 菜单时完全生效。"
+  info "正在重新打开新版本菜单。"
+  exec "$MANAGER_SCRIPT"
+  error "更新已写入，但无法自动重新打开菜单。请退出后重新执行 caddyctl。"
+  return 1
 }
 
 initialize_caddyfile() {
