@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.0"
+readonly MANAGER_VERSION="3.3.2"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1200,7 +1200,7 @@ apply_kopia_listener_address() {
 manage_kopia_listener() {
   local port="$1"
   local listener="$2"
-  local pid unit mode bind_host
+  local pid unit mode bind_host process_info
 
   pid="$(printf '%s\n' "$listener" | listener_pid_from_details)"
   [[ "$pid" =~ ^[0-9]+$ ]] || { error "无法识别 Kopia 进程 PID。"; return 1; }
@@ -1208,6 +1208,13 @@ manage_kopia_listener() {
   printf '\n%sKopia 监听地址修改%s\n' "$BOLD" "$RESET"
   printf '当前监听：\n%s\n' "$listener"
   printf '关联 systemd 服务：%s\n' "${unit:-未识别}"
+  if [[ -z "$unit" ]]; then
+    error "Kopia 不是由 systemd 服务直接管理，无法安全自动修改监听地址。"
+    process_info="$(ps -o pid=,ppid=,user=,comm= -p "$pid" 2>/dev/null || true)"
+    [[ -n "$process_info" ]] && info "进程信息（PID/父进程/用户/命令）：$process_info"
+    info "请在启动 Kopia 的面板、脚本或手工命令中设置 --address=127.0.0.1:${port}，然后重启该服务。"
+    return 1
+  fi
   printf '  1. 仅服务器本机：127.0.0.1:%s（推荐通过 Caddy 访问）\n' "$port"
   printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s（需配合防火墙）\n' "$port"
   printf '  0. 返回\n'
@@ -1259,6 +1266,11 @@ show_docker_mapping_plan() {
   config_files="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$container_id" 2>/dev/null || true)"
 
   printf '\n%sDocker 容器端口映射%s\n' "$BOLD" "$RESET"
+  if [[ -n "$project" ]]; then
+    printf '启动方式：Docker 容器（Compose 管理）\n'
+  else
+    printf '启动方式：Docker 容器\n'
+  fi
   printf '容器：%s\n当前映射：%s:%s -> 容器 %s\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. 仅服务器本机：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
@@ -1291,6 +1303,32 @@ show_docker_mapping_plan() {
   warn "为避免丢失容器环境变量、卷和网络，此菜单不会自动重建 Docker 容器。"
 }
 
+show_native_listener_launch_info() {
+  local listener="$1"
+  local pid unit ppid user process parent_process
+
+  pid="$(printf '%s\n' "$listener" | listener_pid_from_details)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || {
+    warn "无法从监听信息中识别进程 PID。"
+    return 0
+  }
+  unit="$(systemd_unit_for_pid "$pid")"
+  if [[ -n "$unit" ]]; then
+    printf '启动方式：systemd 服务（%s）\n' "$unit"
+    info "下一步：可根据服务类型修改其配置或启动参数，然后通过 systemctl restart $unit 生效。"
+    return 0
+  fi
+
+  ppid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  process="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  parent_process="$(ps -o comm= -p "$ppid" 2>/dev/null | tr -d ' ' || true)"
+  printf '启动方式：手工命令、脚本或面板（未识别为 systemd 服务）\n'
+  printf '进程：%s | PID：%s | 用户：%s | 父进程：%s（PID %s）\n' \
+    "${process:-未知}" "$pid" "${user:-未知}" "${parent_process:-未知}" "${ppid:-未知}"
+  info "下一步：请在上述父进程对应的面板、脚本或启动命令中修改监听地址；菜单不会直接接管该进程。"
+}
+
 local_service_listener_assistant() {
   local port listener process docker_mapping container_id container_name container_port host_ip
 
@@ -1316,6 +1354,7 @@ local_service_listener_assistant() {
     return
   fi
   process="$(printf '%s\n' "$listener" | listener_process_from_details)"
+  show_native_listener_launch_info "$listener"
   if [[ "$process" == "kopia" ]]; then
     manage_kopia_listener "$port" "$listener"
   else
