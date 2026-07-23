@@ -9,7 +9,7 @@ Caddy，并可将 HTTPS 请求反向代理到 Docker 容器中的服务。
 
 ```bash
 caddyctl                         # 打开管理菜单
-caddyctl --install               # 直接安装 Caddy 与管理入口
+caddyctl --install               # 安装 Caddy 与管理入口，然后打开管理菜单
 caddy version                    # 官方 Caddy CLI
 caddy validate --config /etc/caddy/Caddyfile
 ```
@@ -22,7 +22,7 @@ caddy validate --config /etc/caddy/Caddyfile
 curl -fsSL https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/install.sh | bash
 ```
 
-安装脚本会下载 `caddyctl.sh` 并执行安装。完成后使用：
+安装脚本会下载 `caddyctl.sh`、完成安装，并自动打开管理菜单。之后也可使用：
 
 ```bash
 caddyctl
@@ -53,13 +53,18 @@ services:
 
 ```text
 caddyctl
-  -> 5. 添加反向代理（手动 / Docker 向导）
+  -> 5. 新增反向代理
   -> 2. Docker 容器连接向导
 ```
 
 向导会列出容器、读取现有端口映射、检查连接并创建站点配置。若容器尚未发布
 端口，它会输出应加入 Compose 的回环地址映射。Docker 不能给已创建的容器原地
 增加端口映射，因此脚本不会自动重建或删除容器。
+
+若手动填写 `127.0.0.1` 后出现 502，表示 Caddy 无法通过宿主机回环接口连接
+上游。确认 Docker 端口映射是 `127.0.0.1:宿主机端口:容器端口` 或
+`0.0.0.0:宿主机端口:容器端口`；若它只绑定到服务器的特定 IP，则在菜单中选择
+“修改当前反向代理配置”并填写该 IP。
 
 ## 文件位置
 

@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="2.0.0"
+readonly MANAGER_VERSION="2.1.0"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITES_DIR="/etc/caddy/sites"
@@ -38,7 +38,7 @@ error() { printf '%s[错误]%s %s\n' "$RED" "$RESET" "$*" >&2; }
 
 pause_menu() {
   printf '\n'
-  read -r -p "按 Enter 返回菜单..." _ || true
+  read -r -p "按 Enter 键返回主菜单..." _ || true
 }
 
 manager_source() {
@@ -49,7 +49,7 @@ manager_source() {
 show_command_usage() {
   printf '%s\n' "$PROJECT_NAME 是 Caddy 的管理菜单。"
   printf '%s\n' "用法：caddyctl [--install]"
-  printf '%s\n' "  --install  直接安装 Caddy 和 caddyctl 管理入口"
+  printf '%s\n' "  --install  安装 Caddy 和 caddyctl 管理入口，然后打开管理菜单"
   printf '%s\n' "官方 Caddy CLI 保持不变，例如：caddy version"
 }
 
@@ -63,7 +63,7 @@ require_root() {
     exit 1
   fi
 
-  exec sudo bash "$(manager_source)"
+  exec sudo bash "$(manager_source)" "$@"
 }
 
 detect_package_manager() {
@@ -130,13 +130,13 @@ set -uo pipefail
 # CaddyCtl command wrapper
 readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
 
-if [[ $# -ne 0 ]]; then
-  printf 'caddyctl 是管理菜单，请使用无参数的 caddyctl。官方 CLI 请使用 caddy。\n' >&2
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--install" ) ]]; then
+  printf 'caddyctl 仅支持无参数或 --install。官方 CLI 请使用 caddy。\n' >&2
   exit 2
 fi
 
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-  exec "$MANAGER_SCRIPT"
+  exec "$MANAGER_SCRIPT" "$@"
 fi
 
 if ! command -v sudo >/dev/null 2>&1; then
@@ -144,7 +144,7 @@ if ! command -v sudo >/dev/null 2>&1; then
   exit 1
 fi
 
-exec sudo "$MANAGER_SCRIPT"
+exec sudo "$MANAGER_SCRIPT" "$@"
 WRAPPER
   chmod 0755 "$MANAGER_COMMAND"
 }
@@ -374,6 +374,27 @@ reload_validated_config() {
   fi
 }
 
+test_upstream_connection() {
+  local upstream_host="$1"
+  local upstream_port="$2"
+  local upstream_scheme="$3"
+  local formatted_host
+
+  command -v curl >/dev/null 2>&1 || return 0
+  formatted_host="$(format_upstream_host "$upstream_host")"
+  if curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
+      "$upstream_scheme://$formatted_host:$upstream_port/"; then
+    success "宿主机可以访问上游服务。"
+    return 0
+  fi
+
+  warn "宿主机无法连接 $upstream_scheme://$formatted_host:$upstream_port，配置后会出现 502。"
+  if [[ "$upstream_host" == "127.0.0.1" || "$upstream_host" == "::1" ]]; then
+    info "127.0.0.1 仅能访问发布到回环接口或所有接口的端口；若 Docker 端口绑定到服务器具体 IP，请填写该 IP。"
+  fi
+  return 1
+}
+
 save_proxy_config() {
   local domain="$1"
   local upstream_host="$2"
@@ -404,8 +425,8 @@ save_proxy_config() {
   temp_file="$(mktemp "${SITES_DIR}/.${domain}.XXXXXX")" || return 1
   formatted_host="$(format_upstream_host "$upstream_host")"
 
-  cat >"$temp_file" <<EOF
-# Managed by CaddyCtl. Local changes are preserved until this domain is edited again.
+cat >"$temp_file" <<EOF
+# 由 CaddyCtl 管理。再次通过菜单修改此站点时，该文件将被更新。
 $domain {
 	reverse_proxy $upstream_scheme://$formatted_host:$upstream_port
 }
@@ -451,7 +472,7 @@ configure_manual_proxy() {
     return 1
   fi
 
-  read -r -p "2. 上游 IP/主机名（宿主机代理 Docker 通常填 127.0.0.1）：" upstream_host
+  read -r -p "2. 上游地址（Docker 通常填 127.0.0.1；其他服务填实际监听地址）：" upstream_host
   upstream_host="${upstream_host#[}"
   upstream_host="${upstream_host%]}"
   if ! is_valid_upstream_host "$upstream_host"; then
@@ -472,6 +493,7 @@ configure_manual_proxy() {
     return 1
   fi
 
+  test_upstream_connection "$upstream_host" "$upstream_port" "$upstream_scheme" || true
   save_proxy_config "$domain" "$upstream_host" "$upstream_port" "$upstream_scheme"
 }
 
@@ -598,14 +620,7 @@ configure_docker_proxy() {
     return 1
   fi
 
-  if command -v curl >/dev/null 2>&1; then
-    if curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
-        "$upstream_scheme://$upstream_host:$host_port/"; then
-      success "宿主机可以访问容器映射端口。"
-    else
-      warn "端口映射存在，但暂时无法取得 HTTP 响应；配置后可能出现 502。"
-    fi
-  fi
+  test_upstream_connection "$upstream_host" "$host_port" "$upstream_scheme" || true
 
   save_proxy_config "$domain" "$upstream_host" "$host_port" "$upstream_scheme"
 }
@@ -618,9 +633,9 @@ configure_proxy() {
     return 1
   fi
 
-  printf '\n%s选择上游类型%s\n' "$BOLD" "$RESET"
-  printf '  1. 手动输入 IP/主机名和端口\n'
-  printf '  2. Docker 容器连接向导\n'
+  printf '\n%s请选择上游服务类型%s\n' "$BOLD" "$RESET"
+  printf '  1. 手动填写服务地址和端口\n'
+  printf '  2. Docker 容器连接向导（仅适用于 Docker 容器）\n'
   printf '  0. 返回\n'
   read -r -p "请选择 [0-2]：" mode
 
@@ -632,24 +647,148 @@ configure_proxy() {
   esac
 }
 
-show_config() {
-  printf '\n%s主配置：%s%s\n' "$BOLD" "$CADDYFILE" "$RESET"
+read_proxy_settings() {
+  local target="$1"
+  local upstream address upstream_scheme upstream_host upstream_port
+
+  upstream="$(awk '$1 == "reverse_proxy" { print $2; exit }' "$target")"
+  [[ "$upstream" =~ ^https?:// ]] || return 1
+  upstream_scheme="${upstream%%://*}"
+  address="${upstream#*://}"
+
+  if [[ "$address" =~ ^\[([[:xdigit:]:]+)\]:([0-9]+)$ ]]; then
+    upstream_host="${BASH_REMATCH[1]}"
+    upstream_port="${BASH_REMATCH[2]}"
+  elif [[ "$address" =~ ^([^:/]+):([0-9]+)$ ]]; then
+    upstream_host="${BASH_REMATCH[1]}"
+    upstream_port="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+
+  is_valid_upstream_host "$upstream_host" && is_valid_port "$upstream_port" || return 1
+  printf '%s\t%s\t%s\n' "$upstream_scheme" "$upstream_host" "$upstream_port"
+}
+
+show_site_choices() {
+  local site domain settings upstream_scheme upstream_host upstream_port
+
+  for site in "$SITES_DIR"/*.caddy; do
+    domain="${site##*/}"
+    domain="${domain%.caddy}"
+    settings="$(read_proxy_settings "$site" || true)"
+    if [[ -n "$settings" ]]; then
+      IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
+      printf '  - %s  ->  %s://%s:%s\n' \
+        "$domain" "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
+    else
+      printf '  - %s  ->  自定义 Caddy 配置\n' "$domain"
+    fi
+  done
+}
+
+edit_proxy_config() {
+  local domain target settings upstream_scheme upstream_host upstream_port
+  local updated_host updated_port updated_scheme
+
+  if [[ ! -x "$REAL_CADDY" ]]; then
+    error "请先安装 Caddy。"
+    return 1
+  fi
+  if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
+    warn "暂无可修改的站点配置。"
+    return 0
+  fi
+
+  printf '\n可修改的站点（域名 -> 当前上游）：\n'
+  show_site_choices
+  read -r -p "输入需要修改的完整域名：" domain
+  domain="${domain,,}"
+  if ! is_valid_domain "$domain"; then
+    error "域名格式不正确。"
+    return 1
+  fi
+
+  target="$(site_path_for_domain "$domain")"
+  if [[ ! -f "$target" ]]; then
+    error "未找到该域名的独立配置：$target"
+    return 1
+  fi
+  settings="$(read_proxy_settings "$target")" || {
+    error "无法识别该站点的上游地址；仅支持本工具生成的 reverse_proxy http(s)://主机:端口 配置。"
+    return 1
+  }
+  IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
+
+  printf '\n当前上游：%s://%s:%s\n' "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
+  read -r -p "1. 上游 IP/主机名 [$upstream_host]：" updated_host
+  updated_host="${updated_host:-$upstream_host}"
+  updated_host="${updated_host#[}"
+  updated_host="${updated_host%]}"
+  if ! is_valid_upstream_host "$updated_host"; then
+    error "上游 IP/主机名格式不正确。"
+    return 1
+  fi
+
+  read -r -p "2. 上游端口 [$upstream_port]：" updated_port
+  updated_port="${updated_port:-$upstream_port}"
+  if ! is_valid_port "$updated_port"; then
+    error "端口必须是 1-65535 之间的整数。"
+    return 1
+  fi
+
+  read -r -p "3. 上游协议 [http/https，当前 $upstream_scheme]：" updated_scheme
+  updated_scheme="${updated_scheme:-$upstream_scheme}"
+  if [[ "$updated_scheme" != "http" && "$updated_scheme" != "https" ]]; then
+    error "上游协议只能是 http 或 https。"
+    return 1
+  fi
+
+  test_upstream_connection "$updated_host" "$updated_port" "$updated_scheme" || true
+  save_proxy_config "$domain" "$updated_host" "$updated_port" "$updated_scheme"
+}
+
+show_raw_config() {
+  local site
+
+  printf '\n%s原始主配置：%s%s\n' "$BOLD" "$CADDYFILE" "$RESET"
   if [[ -f "$CADDYFILE" ]]; then
     sed -n '1,$p' "$CADDYFILE"
   else
-    warn "主配置不存在。"
+    warn "主配置文件不存在。"
   fi
 
-  printf '\n%s站点配置：%s%s\n' "$BOLD" "$SITES_DIR" "$RESET"
+  printf '\n%s原始站点配置：%s%s\n' "$BOLD" "$SITES_DIR" "$RESET"
   if compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
-    local site
     for site in "$SITES_DIR"/*.caddy; do
       printf '\n--- %s ---\n' "$site"
       sed -n '1,$p' "$site"
     done
   else
-    warn "暂无站点配置。"
+    warn "暂未找到站点配置文件。"
   fi
+}
+
+show_config() {
+  local answer
+
+  printf '\n%s当前反向代理配置%s\n' "$BOLD" "$RESET"
+  if [[ -f "$CADDYFILE" ]] && grep -Fq "import $SITES_DIR/*.caddy" "$CADDYFILE"; then
+    printf '  主配置：已加载站点目录 %s\n' "$SITES_DIR"
+  else
+    warn "主配置未检测到站点目录导入，请检查 $CADDYFILE。"
+  fi
+
+  if compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
+    printf '\n已配置站点（域名 -> 上游）：\n'
+    show_site_choices
+    printf '\n提示：使用“修改现有反向代理”更新上游，使用“删除反向代理”移除站点。\n'
+  else
+    warn "暂未配置反向代理站点。"
+  fi
+
+  read -r -p "是否查看原始 Caddy 配置？[y/N]：" answer
+  [[ "$answer" =~ ^[Yy]$ ]] && show_raw_config
 }
 
 delete_proxy() {
@@ -665,9 +804,8 @@ delete_proxy() {
     return 0
   fi
 
-  printf '\n当前站点：\n'
-  find "$SITES_DIR" -maxdepth 1 -type f -name '*.caddy' -printf '  - %f\n' 2>/dev/null \
-    | sed 's/\.caddy$//'
+  printf '\n可删除的站点（域名 -> 当前上游）：\n'
+  show_site_choices
   read -r -p "输入需要删除的完整域名：" domain
   domain="${domain,,}"
 
@@ -721,11 +859,12 @@ show_logs() {
     error "当前系统没有 journalctl。"
     return 1
   fi
+  printf '\n%sCaddy 最近 120 条服务日志%s\n' "$BOLD" "$RESET"
   journalctl -u caddy -n 120 --no-pager
 }
 
 show_listeners() {
-  printf '\n%s宿主机监听端口%s\n' "$BOLD" "$RESET"
+  printf '\n%s宿主机监听端口（Caddy、Docker、80、443）%s\n' "$BOLD" "$RESET"
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
   elif command -v netstat >/dev/null 2>&1; then
@@ -734,9 +873,10 @@ show_listeners() {
     warn "未找到 ss 或 netstat。"
   fi
 
-  printf '\n%sDocker 端口映射%s\n' "$BOLD" "$RESET"
+  printf '\n%sDocker 容器端口映射%s\n' "$BOLD" "$RESET"
   if command -v docker >/dev/null 2>&1; then
-    docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
+    printf '容器名称\t状态\t端口映射\n'
+    docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true
   else
     warn "未安装 Docker。"
   fi
@@ -764,28 +904,29 @@ status_line() {
     site_count="$(find "$SITES_DIR" -maxdepth 1 -type f -name '*.caddy' 2>/dev/null | wc -l | tr -d ' ')"
   fi
 
-  printf '状态：%s%s%s | 服务：%s | 自启：%s | 站点：%s\n' \
+  printf '安装：%s%s%s | 服务：%s | 开机启动：%s | 站点数：%s\n' \
     "$GREEN" "$installed" "$RESET" "$active" "$enabled" "$site_count"
-  printf 'Caddy：%s | %s：%s\n' "$version" "$PROJECT_NAME" "$MANAGER_VERSION"
+  printf 'Caddy 版本：%s | CaddyCtl 版本：%s\n' "$version" "$MANAGER_VERSION"
 }
 
 draw_menu() {
   clear 2>/dev/null || true
   printf '%s============================================%s\n' "$BLUE" "$RESET"
-  printf '%s          CaddyCtl 中文管理菜单%s\n' "$BOLD" "$RESET"
+  printf '%s              CaddyCtl 管理菜单%s\n' "$BOLD" "$RESET"
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   status_line
   printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
-  printf '  1. Caddy 当前状态\n'
-  printf '  2. 安装 Caddy / 安装管理命令\n'
+  printf '  1. 查看运行状态\n'
+  printf '  2. 安装或修复 Caddy\n'
   printf '  3. 更新 Caddy\n'
-  printf '  4. 卸载 Caddy（保留配置）\n'
-  printf '  5. 添加反向代理（手动 / Docker 向导）\n'
-  printf '  6. 查看当前配置\n'
-  printf '  7. 删除反向代理配置\n'
-  printf '  8. 校验配置并重载\n'
-  printf '  9. 查看 Caddy 日志\n'
-  printf ' 10. 检查监听端口和 Docker 映射\n'
+  printf '  4. 卸载 Caddy（保留配置和证书）\n'
+  printf '  5. 新增反向代理\n'
+  printf '  6. 修改现有反向代理\n'
+  printf '  7. 查看当前反向代理配置\n'
+  printf '  8. 删除反向代理\n'
+  printf '  9. 校验并重载 Caddy\n'
+  printf ' 10. 查看 Caddy 服务日志\n'
+  printf ' 11. 查看端口监听与 Docker 映射\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
 }
@@ -802,7 +943,7 @@ main_menu() {
   local choice
   while true; do
     draw_menu
-    read -r -p "请选择 [0-10]：" choice || exit 0
+    read -r -p "请选择 [0-11]：" choice || exit 0
     printf '\n'
 
     case "$choice" in
@@ -811,11 +952,12 @@ main_menu() {
       3) update_caddy; pause_menu ;;
       4) uninstall_caddy; pause_menu ;;
       5) configure_proxy; pause_menu ;;
-      6) show_config; pause_menu ;;
-      7) delete_proxy; pause_menu ;;
-      8) validate_and_reload; pause_menu ;;
-      9) show_logs; pause_menu ;;
-      10) show_listeners; pause_menu ;;
+      6) edit_proxy_config; pause_menu ;;
+      7) show_config; pause_menu ;;
+      8) delete_proxy; pause_menu ;;
+      9) validate_and_reload; pause_menu ;;
+      10) show_logs; pause_menu ;;
+      11) show_listeners; pause_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac
@@ -828,14 +970,15 @@ if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
 fi
 
 if [[ $# -eq 1 && "$1" == "--install" ]]; then
-  require_root
-  install_caddy
-  exit $?
+  require_root "$@"
+  install_caddy || exit $?
+  main_menu
+  exit 0
 fi
 
 if [[ $# -ne 0 ]]; then
   show_command_usage
   exit 2
 fi
-require_root
+require_root "$@"
 main_menu
