@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.0.0"
+readonly MANAGER_VERSION="3.1.0"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -940,20 +940,27 @@ is_local_upstream_host() {
   ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$host"
 }
 
+local_tcp_listener_details() {
+  local port="$1"
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnpH "sport = :$port" 2>/dev/null || true
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null | awk -v port=":$port" '$4 ~ (port "$")'
+  fi
+}
+
 show_local_listener() {
   local port="$1"
   local listener
 
   printf '\n%s本机端口监听结果%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
-  if command -v ss >/dev/null 2>&1; then
-    listener="$(ss -ltnpH "sport = :$port" 2>/dev/null || true)"
-  elif command -v netstat >/dev/null 2>&1; then
-    listener="$(netstat -ltnp 2>/dev/null | awk -v port=":$port" '$4 ~ (port "$")')"
-  else
+  if ! command -v ss >/dev/null 2>&1 && ! command -v netstat >/dev/null 2>&1; then
     warn "未找到 ss 或 netstat，无法查看本机监听状态。"
     return 0
   fi
+  listener="$(local_tcp_listener_details "$port")"
 
   if [[ -n "$listener" ]]; then
     printf '%s\n' "$listener"
@@ -967,6 +974,7 @@ diagnose_upstream_target() {
   local upstream_scheme="$2"
   local upstream_host="$3"
   local upstream_port="$4"
+  local listener
 
   printf '\n%s%s%s\n' "$BOLD" "$label" "$RESET"
   printf '后端服务地址：%s://%s:%s\n' \
@@ -974,7 +982,13 @@ diagnose_upstream_target() {
   if is_local_upstream_host "$upstream_host"; then
     show_local_listener "$upstream_port"
   else
-    info "$upstream_host 不属于本机地址，无法从本机读取其监听状态；将只检测连通性。"
+    listener="$(local_tcp_listener_details "$upstream_port")"
+    if [[ -n "$listener" ]]; then
+      warn "$upstream_host 未出现在本机网卡地址中，可能是云服务器公网 IP 映射；已发现本机同端口监听。"
+      printf '%s\n' "$listener"
+    else
+      info "$upstream_host 未出现在本机网卡地址中，可能是远程服务或云公网 IP 映射；将只检测连通性。"
+    fi
   fi
 
   printf '\n%sHTTP/HTTPS 连通性%s\n' "$BOLD" "$RESET"
@@ -1152,21 +1166,51 @@ kopia_safe_assistant() {
     *) error "无效选项：$mode"; return 1 ;;
   esac
 
-  if ! is_local_upstream_host "$upstream_host"; then
-    error "$upstream_host 不是本机地址，安全助手无法读取远程服务的监听状态。"
-    return 1
-  fi
   listener="$(kopia_listener_details "$upstream_port")"
   if [[ -z "$listener" ]]; then
     warn "未在本机端口 $upstream_port 识别到 Kopia 监听进程。"
     show_local_listener "$upstream_port"
-    info "请确认端口和服务名称；此助手当前仅支持由 kopia 进程监听的服务。"
+    info "请确认端口和服务名称；若填写的是云公网 IP，请先确认该端口在本机确实由 Kopia 监听。"
     return 1
+  fi
+
+  if ! is_local_upstream_host "$upstream_host"; then
+    warn "$upstream_host 未出现在本机网卡地址中，可能是云服务器公网 IP 映射；将使用已识别的本机 Kopia 进程生成方案。"
   fi
 
   success "已识别 Kopia 监听进程："
   printf '%s\n' "$listener"
   show_kopia_binding_plan "$upstream_port"
+}
+
+show_all_local_listeners() {
+  printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
+  info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltnp 2>/dev/null
+  else
+    warn "未找到 ss 或 netstat，无法查看本机监听状态。"
+  fi
+}
+
+local_service_listener_assistant() {
+  local mode
+
+  printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
+  info "先查看本机服务的监听地址和进程；Kopia 子功能仅生成安全修改方案。"
+  printf '  1. 查看全部本机 TCP 服务监听地址\n'
+  printf '  2. Kopia 监听地址调整方案（预览）\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-2]：" mode
+
+  case "$mode" in
+    1) show_all_local_listeners ;;
+    2) kopia_safe_assistant ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
 }
 
 delete_proxy() {
@@ -1241,7 +1285,7 @@ show_logs() {
 }
 
 show_listeners() {
-  printf '\n%s宿主机监听端口（Caddy、Docker、80、443）%s\n' "$BOLD" "$RESET"
+  printf '\n%sCaddy 端口监听与 Docker 映射%s\n' "$BOLD" "$RESET"
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
   elif command -v netstat >/dev/null 2>&1; then
@@ -1303,11 +1347,12 @@ draw_menu() {
   printf '  8. 删除反向代理\n'
   printf '  9. 校验并重载 Caddy\n'
   printf ' 10. 查看 Caddy 服务日志\n'
-  printf ' 11. 查看端口监听与 Docker 映射\n'
+  printf ' 11. 查看 Caddy 端口监听与 Docker 映射\n'
   printf ' 12. 检测后端服务监听与连通性\n'
-  printf ' 13. Kopia 监听配置助手（预览）\n'
+  printf ' 13. 本机服务端口监听助手\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
+  printf '提示：退出后可在终端输入 caddyctl 再次打开本菜单。\n'
 }
 
 show_status_detail() {
@@ -1364,7 +1409,7 @@ main_menu() {
       10) show_logs; pause_menu ;;
       11) show_listeners; pause_menu ;;
       12) diagnose_upstream; pause_menu ;;
-      13) kopia_safe_assistant; pause_menu ;;
+      13) local_service_listener_assistant; pause_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac
@@ -1387,6 +1432,7 @@ if [[ $# -eq 1 && "$1" == "--install-manager" ]]; then
   require_root "$@"
   install_manager_command
   success "CaddyCtl 管理菜单已安装。请在菜单中选择“安装或更新 Caddy”继续。"
+  info "以后可在终端直接输入 caddyctl 打开管理菜单。"
   main_menu
   exit 0
 fi
