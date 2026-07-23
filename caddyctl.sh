@@ -48,7 +48,8 @@ manager_source() {
 
 show_command_usage() {
   printf '%s\n' "$PROJECT_NAME 是 Caddy 的管理菜单。"
-  printf '%s\n' "用法：caddyctl"
+  printf '%s\n' "用法：caddyctl [--install]"
+  printf '%s\n' "  --install  直接安装 Caddy 和 caddyctl 管理入口"
   printf '%s\n' "官方 Caddy CLI 保持不变，例如：caddy version"
 }
 
@@ -820,6 +821,17 @@ main_menu() {
     esac
   done
 }
+
+if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
+  show_command_usage
+  exit 0
+fi
+
+if [[ $# -eq 1 && "$1" == "--install" ]]; then
+  require_root
+  install_caddy
+  exit $?
+fi
 
 if [[ $# -ne 0 ]]; then
   show_command_usage

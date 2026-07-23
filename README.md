@@ -9,21 +9,33 @@ Caddy，并可将 HTTPS 请求反向代理到 Docker 容器中的服务。
 
 ```bash
 caddyctl                         # 打开管理菜单
+caddyctl --install               # 直接安装 Caddy 与管理入口
 caddy version                    # 官方 Caddy CLI
 caddy validate --config /etc/caddy/Caddyfile
 ```
 
-## 安装
+## 一键安装
 
-将 `caddyctl.sh` 上传到服务器后执行：
+在 Linux 服务器执行：
 
 ```bash
-chmod +x caddyctl.sh
-sudo ./caddyctl.sh
+curl -fsSL https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/install.sh | bash
 ```
 
-在菜单中选择“安装 Caddy / 安装管理命令”。安装完成后，使用 `caddyctl` 打开
-菜单。脚本支持使用 systemd 的 Debian/Ubuntu 和 Fedora/RHEL（dnf）系统。
+安装脚本会下载 `caddyctl.sh` 并执行安装。完成后使用：
+
+```bash
+caddyctl
+```
+
+也可以克隆仓库后在本地运行：
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+脚本支持使用 systemd 的 Debian/Ubuntu 和 Fedora/RHEL（dnf）系统。
 
 ## Docker 反向代理
 
@@ -49,21 +61,10 @@ caddyctl
 端口，它会输出应加入 Compose 的回环地址映射。Docker 不能给已创建的容器原地
 增加端口映射，因此脚本不会自动重建或删除容器。
 
-## 旧版迁移
-
-旧版脚本会把管理菜单安装为 `caddy`，这会遮蔽官方 CLI。运行新版
-`caddyctl.sh` 后选择“安装 Caddy / 安装管理命令”，脚本会：
-
-- 安装新的 `caddyctl` 管理入口；
-- 备份并移除可确认属于旧版的 `/usr/local/bin/caddy` 包装器；
-- 保留 `/etc/caddy`、证书数据和已有站点配置。
-
-如果 `caddy` 是其他手工创建的程序，脚本不会删除它。
-
 ## 文件位置
 
 - 站点配置：`/etc/caddy/sites/*.caddy`
-- 配置和迁移备份：`/var/backups/caddyctl`
+- 配置备份：`/var/backups/caddyctl`
 - CaddyCtl 本体：`/usr/local/lib/caddyctl/caddyctl.sh`
 - 菜单入口：`/usr/local/bin/caddyctl`
 
