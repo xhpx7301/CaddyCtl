@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.8"
+readonly MANAGER_VERSION="3.3.9"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1113,6 +1113,30 @@ is_valid_ipv4() {
   done
 }
 
+is_npm_container() {
+  local image="${1,,}"
+  local container_name="${2,,}"
+
+  case "$image" in
+    *nginx*proxy*manager*|jc21/*) return 0 ;;
+  esac
+  case "$container_name" in
+    npm|npm-*|nginx-proxy-manager|nginx-proxy-manager-*) return 0 ;;
+  esac
+  return 1
+}
+
+find_npm_containers() {
+  local container_id image container_name
+
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  while IFS=$'\t' read -r container_id image container_name; do
+    is_npm_container "$image" "$container_name" || continue
+    printf '%s\t%s\t%s\n' "$container_id" "$container_name" "$image"
+  done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
+}
+
 docker_gateway_targets_for_container() {
   local container_reference="$1"
   local container_id container_name network gateway
@@ -1145,15 +1169,7 @@ find_npm_gateway_targets() {
   docker info >/dev/null 2>&1 || return 0
 
   while IFS=$'\t' read -r container_id image container_name; do
-    case "${image,,}" in
-      *nginx*proxy*manager*|jc21/*) ;;
-      *)
-        case "${container_name,,}" in
-          npm|npm-*|nginx-proxy-manager|nginx-proxy-manager-*) ;;
-          *) continue ;;
-        esac
-        ;;
-    esac
+    is_npm_container "$image" "$container_name" || continue
     docker_gateway_targets_for_container "$container_id"
   done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
 }
@@ -1581,6 +1597,108 @@ docker_mapping_for_host_port() {
   done < <(docker ps --format '{{.ID}}\t{{.Names}}' 2>/dev/null)
 }
 
+docker_container_network_names() {
+  docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$1" 2>/dev/null
+}
+
+docker_compose_service_or_name() {
+  local container_reference="$1"
+  local service container_name
+
+  service="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container_reference" 2>/dev/null || true)"
+  if [[ -n "$service" && "$service" != "<no value>" ]]; then
+    printf '%s\n' "$service"
+    return 0
+  fi
+  container_name="$(docker inspect --format '{{.Name}}' "$container_reference" 2>/dev/null || true)"
+  printf '%s\n' "${container_name#/}"
+}
+
+show_npm_shared_network_guide() {
+  local app_container_id="$1"
+  local app_container_name="$2"
+  local container_port="$3"
+  local npm_target npm_container_id npm_container_name npm_image manual_container selection
+  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name
+  local -a npm_containers app_networks npm_networks
+
+  printf '\n%sDocker 后端 + NPM 共享网络指引%s\n' "$BOLD" "$RESET"
+  mapfile -t npm_containers < <(find_npm_containers)
+  if (( ${#npm_containers[@]} == 0 )); then
+    warn "未自动识别 Nginx Proxy Manager 容器。"
+    show_running_docker_containers
+    read -r -p "输入 NPM 容器名称或 ID（直接回车返回）:" manual_container
+    [[ -n "$manual_container" ]] || return 0
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$manual_container" 2>/dev/null)" != "true" ]]; then
+      error "容器未运行或不存在：$manual_container"
+      return 1
+    fi
+    npm_container_id="$(docker inspect --format '{{.Id}}' "$manual_container" 2>/dev/null || true)"
+    npm_container_name="$(docker inspect --format '{{.Name}}' "$manual_container" 2>/dev/null || true)"
+    npm_container_name="${npm_container_name#/}"
+  elif (( ${#npm_containers[@]} == 1 )); then
+    npm_target="${npm_containers[0]}"
+    IFS=$'\t' read -r npm_container_id npm_container_name npm_image <<< "$npm_target"
+  else
+    printf '检测到多个 NPM 容器：\n'
+    local i
+    for ((i = 0; i < ${#npm_containers[@]}; i++)); do
+      IFS=$'\t' read -r npm_container_id npm_container_name npm_image <<< "${npm_containers[$i]}"
+      printf '  %d. %s | %s\n' "$((i + 1))" "$npm_container_name" "$npm_image"
+    done
+    read -r -p "请选择 [1-${#npm_containers[@]}]：" selection
+    if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#npm_containers[@]} )); then
+      error "无效选项：$selection"
+      return 1
+    fi
+    npm_target="${npm_containers[$((selection - 1))]}"
+    IFS=$'\t' read -r npm_container_id npm_container_name npm_image <<< "$npm_target"
+  fi
+
+  mapfile -t app_networks < <(docker_container_network_names "$app_container_id")
+  mapfile -t npm_networks < <(docker_container_network_names "$npm_container_id")
+  for app_network in "${app_networks[@]}"; do
+    for npm_network in "${npm_networks[@]}"; do
+      if [[ "$app_network" == "$npm_network" ]]; then
+        shared_network="$app_network"
+        break 2
+      fi
+    done
+  done
+
+  internal_port="${container_port%/tcp}"
+  app_service="$(docker_compose_service_or_name "$app_container_id")"
+  upstream_name="${app_service:-$app_container_name}"
+  if [[ -n "$shared_network" ]]; then
+    success "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 已共享网络：${shared_network}。"
+    info "请在 NPM 中将上游设为 ${upstream_name}:${internal_port}，协议按应用实际情况选择。"
+    warn "请确认该网络已在两个 Compose 文件中声明；手工 docker network connect 的连接会在容器重建后丢失。"
+    return 0
+  fi
+
+  warn "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 没有共享 Docker 网络。"
+  read -r -p "共享网络名称 [默认 npm-proxy]：" shared_network
+  shared_network="${shared_network:-npm-proxy}"
+  if [[ ! "$shared_network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    error "Docker 网络名称格式不正确。"
+    return 1
+  fi
+  npm_service="$(docker_compose_service_or_name "$npm_container_id")"
+
+  if docker network inspect "$shared_network" >/dev/null 2>&1; then
+    info "Docker 网络 ${shared_network} 已存在。"
+  else
+    printf '\n先执行一次：\n\n  docker network create %s\n' "$shared_network"
+  fi
+  printf '\n在 NPM 和应用各自的 Compose 文件中加入同名外部网络：\n\n'
+  printf 'services:\n  %s:\n    networks:\n      - %s\n\n' "${npm_service:-<NPM服务名>}" "$shared_network"
+  printf 'services:\n  %s:\n    networks:\n      - %s\n\n' "${app_service:-<应用服务名>}" "$shared_network"
+  printf 'networks:\n  %s:\n    external: true\n\n' "$shared_network"
+  info "分别在两个 Compose 项目目录执行 docker compose up -d。"
+  info "完成后，NPM 上游填写 ${upstream_name}:${internal_port}，无需发布该应用端口到宿主机。"
+  warn "确认 NPM 访问正常后，才移除应用现有 ports 映射；菜单不会自动重建容器。"
+}
+
 show_docker_mapping_plan() {
   local container_id="$1"
   local container_name="$2"
@@ -1605,14 +1723,19 @@ show_docker_mapping_plan() {
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. 仅服务器本机：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
   printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
+  printf '  3. Docker NPM 共享网络指引（容器间通过服务名访问）\n'
   printf '  0. 返回\n'
-  read -r -p "请选择 [0-2]：" mode
+  read -r -p "请选择 [0-3]：" mode
 
   case "$mode" in
     1) bind_host="127.0.0.1" ;;
     2)
       bind_host="0.0.0.0"
       warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
+      ;;
+    3)
+      show_npm_shared_network_guide "$container_id" "$container_name" "$container_port"
+      return
       ;;
     0) return 0 ;;
     *) error "无效选项：$mode"; return 1 ;;
