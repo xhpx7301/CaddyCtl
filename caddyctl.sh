@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.2"
+readonly MANAGER_VERSION="3.3.4"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1079,6 +1079,67 @@ listener_process_from_details() {
   sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n 1
 }
 
+is_valid_ipv4() {
+  local address="$1" octet
+
+  [[ "$address" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  IFS='.' read -r -a octet <<< "$address"
+  (( ${#octet[@]} == 4 )) || return 1
+  for address in "${octet[@]}"; do
+    (( 10#$address <= 255 )) || return 1
+  done
+}
+
+find_npm_gateway_targets() {
+  local container_id image container_name network gateway
+
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+
+  while IFS=$'\t' read -r container_id image container_name; do
+    case "${image,,}" in
+      *nginx-proxy-manager*|jc21/*) ;;
+      *)
+        case "${container_name,,}" in
+          npm|npm-*|nginx-proxy-manager|nginx-proxy-manager-*) ;;
+          *) continue ;;
+        esac
+        ;;
+    esac
+    while IFS=$'\t' read -r network gateway; do
+      is_valid_ipv4 "$gateway" || continue
+      printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$network" "$gateway"
+    done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\\t%s\\n" $name $network.Gateway}}{{end}}' "$container_id" 2>/dev/null)
+  done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
+}
+
+verify_npm_gateway_connection() {
+  local container_id="$1"
+  local container_name="$2"
+  local gateway="$3"
+  local port="$4"
+  local node_check
+
+  node_check='const net = require("net");
+const host = process.argv[1];
+const port = Number(process.argv[2]);
+const socket = net.createConnection({ host, port });
+socket.setTimeout(5000);
+socket.on("connect", () => { socket.end(); process.exit(0); });
+socket.on("timeout", () => { socket.destroy(); process.exit(1); });
+socket.on("error", () => process.exit(1));'
+
+  printf '\n%sNPM 容器连通性验证%s\n' "$BOLD" "$RESET"
+  if docker exec "$container_id" node -e "$node_check" "$gateway" "$port" >/dev/null 2>&1; then
+    success "NPM 容器 ${container_name} 可连接 Kopia：${gateway}:${port}。"
+    info "请在 Nginx Proxy Manager 中将“转发主机名/IP”设为 ${gateway}，端口设为 ${port}，协议使用 http。"
+    return 0
+  fi
+
+  warn "NPM 容器 ${container_name} 无法连接 ${gateway}:${port}。请检查 Docker 网络、服务重启结果及主机防火墙。"
+  return 1
+}
+
 systemd_unit_for_pid() {
   local pid="$1"
 
@@ -1197,10 +1258,128 @@ apply_kopia_listener_address() {
   return 1
 }
 
+adopt_manual_kopia_service() {
+  local pid="$1"
+  local port="$2"
+  local unit="caddyctl-kopia-${port}.service"
+  local unit_path="/etc/systemd/system/${unit}"
+  local wrapper_dir="${MANAGER_DIR}/service-wrappers"
+  local wrapper_path="${wrapper_dir}/${unit}.sh"
+  local run_user parent_pid kopia_config_path=""
+  local temp_wrapper temp_unit argument environment_item
+  local -a command
+  local i has_server="false" has_start="false"
+
+  if [[ -e "$unit_path" ]] || systemctl cat "$unit" >/dev/null 2>&1; then
+    error "systemd 服务 ${unit} 已存在，CaddyCtl 不会覆盖它。请先检查或删除该服务后重试。"
+    return 1
+  fi
+  if ! mapfile -d '' -t command < "/proc/$pid/cmdline" || [[ ${#command[@]} -eq 0 ]]; then
+    error "无法读取当前 Kopia 启动命令。"
+    return 1
+  fi
+  if [[ "$(basename "${command[0]}")" != "kopia" ]]; then
+    error "当前进程不是直接由 kopia 命令启动，无法安全接管。"
+    return 1
+  fi
+  for argument in "${command[@]}"; do
+    [[ "$argument" == "server" ]] && has_server="true"
+    [[ "$argument" == "start" ]] && has_start="true"
+  done
+  if [[ "$has_server" != "true" || "$has_start" != "true" ]]; then
+    error "当前 Kopia 命令不是 server start 模式，无法安全接管。"
+    return 1
+  fi
+  run_user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  if [[ -z "$run_user" ]] || ! id "$run_user" >/dev/null 2>&1; then
+    error "无法识别 Kopia 进程的运行用户，无法安全接管。"
+    return 1
+  fi
+  parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  if [[ "$parent_pid" != "1" ]]; then
+    error "Kopia 的父进程为 PID ${parent_pid:-未知}，可能仍受脚本或面板管理；请先在原管理器中停止它，再改用 systemd。"
+    return 1
+  fi
+  while IFS= read -r -d '' environment_item; do
+    [[ "$environment_item" == KOPIA_CONFIG_PATH=* ]] || continue
+    kopia_config_path="${environment_item#KOPIA_CONFIG_PATH=}"
+    break
+  done < "/proc/$pid/environ"
+
+  temp_wrapper="$(mktemp)" || return 1
+  temp_unit="$(mktemp)" || { rm -f -- "$temp_wrapper"; return 1; }
+  {
+    printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+    if [[ -n "$kopia_config_path" ]]; then
+      printf 'export KOPIA_CONFIG_PATH=%q\n' "$kopia_config_path"
+    fi
+    printf 'exec'
+    for argument in "${command[@]}"; do
+      printf ' %q' "$argument"
+    done
+    printf '\n'
+  } >"$temp_wrapper"
+  {
+    printf '[Unit]\nDescription=CaddyCtl managed Kopia server on TCP %s\n' "$port"
+    printf 'Wants=network-online.target\nAfter=network-online.target\n\n'
+    printf '[Service]\nType=simple\n'
+    [[ "$run_user" != "root" ]] && printf 'User=%s\n' "$run_user"
+    printf 'ExecStart=%s\nRestart=on-failure\nRestartSec=5\n\n' "$wrapper_path"
+    printf '[Install]\nWantedBy=multi-user.target\n'
+  } >"$temp_unit"
+
+  warn "将接管 PID ${pid} 的手工 Kopia 进程，保留当前启动参数并创建 ${unit}。"
+  if [[ -n "$kopia_config_path" ]]; then
+    info "已识别 KOPIA_CONFIG_PATH，将随服务保留。"
+  fi
+  confirm_action "确认停止当前手工进程并启用 ${unit}？" || {
+    rm -f -- "$temp_wrapper" "$temp_unit"
+    info "已取消。"
+    return 0
+  }
+
+  install -d -m 0700 "$wrapper_dir"
+  install -m 0700 "$temp_wrapper" "$wrapper_path"
+  install -m 0644 "$temp_unit" "$unit_path"
+  rm -f -- "$temp_wrapper" "$temp_unit"
+  systemctl daemon-reload
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    error "无法停止当前手工 Kopia 进程，未启动新的 systemd 服务。"
+    rm -f -- "$wrapper_path" "$unit_path"
+    systemctl daemon-reload
+    return 1
+  fi
+  for ((i = 0; i < 25; i++)); do
+    [[ -d "/proc/$pid" ]] || break
+    sleep 0.2
+  done
+  if [[ -d "/proc/$pid" ]]; then
+    error "当前手工 Kopia 进程未在 5 秒内退出，未启动新的 systemd 服务。"
+    rm -f -- "$wrapper_path" "$unit_path"
+    systemctl daemon-reload
+    return 1
+  fi
+  if systemctl start "$unit"; then
+    systemctl enable "$unit" >/dev/null 2>&1 || warn "服务已启动，但未能设置开机自启：$unit"
+    success "已接管为 systemd 服务：${unit}。"
+    return 0
+  fi
+
+  error "systemd 服务启动失败，正在尝试恢复原手工启动方式。"
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  "$wrapper_path" >/dev/null 2>&1 &
+  rm -f -- "$wrapper_path" "$unit_path"
+  systemctl daemon-reload
+  warn "已尝试按原命令恢复 Kopia。请使用 ss 或 caddyctl 菜单确认端口监听状态。"
+  return 1
+}
+
 manage_kopia_listener() {
   local port="$1"
   local listener="$2"
-  local pid unit mode bind_host process_info
+  local pid unit mode bind_host process_info parent_pid
+  local -a npm_targets
+  local npm_target npm_container_id npm_container_name npm_network npm_gateway
 
   pid="$(printf '%s\n' "$listener" | listener_pid_from_details)"
   [[ "$pid" =~ ^[0-9]+$ ]] || { error "无法识别 Kopia 进程 PID。"; return 1; }
@@ -1209,20 +1388,75 @@ manage_kopia_listener() {
   printf '当前监听：\n%s\n' "$listener"
   printf '关联 systemd 服务：%s\n' "${unit:-未识别}"
   if [[ -z "$unit" ]]; then
-    error "Kopia 不是由 systemd 服务直接管理，无法安全自动修改监听地址。"
     process_info="$(ps -o pid=,ppid=,user=,comm= -p "$pid" 2>/dev/null || true)"
+    parent_pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
     [[ -n "$process_info" ]] && info "进程信息（PID/父进程/用户/命令）：$process_info"
-    info "请在启动 Kopia 的面板、脚本或手工命令中设置 --address=127.0.0.1:${port}，然后重启该服务。"
-    return 1
+    if [[ "$parent_pid" != "1" ]]; then
+      warn "Kopia 当前可能仍由脚本或面板管理，菜单不会直接接管以避免原管理器重新拉起进程。"
+      info "请先在原脚本或面板中停止并禁用 Kopia，再以 systemd 方式启动。"
+      return 1
+    fi
+    warn "Kopia 当前是已脱离终端的手工命令（由 PID 1 收养），不是 systemd 服务。"
+    printf '  1. 接管为 CaddyCtl 管理的 systemd 服务（保留当前启动参数）\n'
+    printf '  0. 返回\n'
+    read -r -p "请选择 [0-1]：" mode
+    case "$mode" in
+      1)
+        if adopt_manual_kopia_service "$pid" "$port"; then
+          listener="$(local_tcp_listener_details "$port")"
+          if [[ -n "$listener" ]] && [[ "$(printf '%s\n' "$listener" | listener_process_from_details)" == "kopia" ]]; then
+            manage_kopia_listener "$port" "$listener"
+          else
+            warn "接管后的 Kopia 监听状态尚未识别，请稍后重新打开端口助手检查。"
+          fi
+        fi
+        return
+        ;;
+      0) return 0 ;;
+      *) error "无效选项：$mode"; return 1 ;;
+    esac
   fi
-  printf '  1. 仅服务器本机：127.0.0.1:%s（推荐通过 Caddy 访问）\n' "$port"
-  printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s（需配合防火墙）\n' "$port"
+  printf '  1. 仅服务器本机：127.0.0.1:%s（供宿主机上的 Caddy、Nginx 等反代访问）\n' "$port"
+  printf '  2. NPM 容器 Docker 网络网关（自动识别并验证容器连通性）\n'
+  printf '  3. 允许服务器公网 IP 访问：0.0.0.0:%s（需配合防火墙）\n' "$port"
   printf '  0. 返回\n'
-  read -r -p "请选择 [0-2]：" mode
+  read -r -p "请选择 [0-3]：" mode
 
   case "$mode" in
     1) bind_host="127.0.0.1" ;;
     2)
+      mapfile -t npm_targets < <(find_npm_gateway_targets)
+      if (( ${#npm_targets[@]} == 0 )); then
+        error "未发现带 IPv4 Docker 网络网关的 Nginx Proxy Manager 容器。请确认 NPM 正在运行且 Docker 可用。"
+        return 1
+      fi
+      if (( ${#npm_targets[@]} == 1 )); then
+        npm_target="${npm_targets[0]}"
+      else
+        printf '\n检测到多个 NPM Docker 网络：\n'
+        local i selection
+        for ((i = 0; i < ${#npm_targets[@]}; i++)); do
+          IFS=$'\t' read -r npm_container_id npm_container_name npm_network npm_gateway <<< "${npm_targets[$i]}"
+          printf '  %d. 容器 %s，网络 %s，网关 %s\n' "$((i + 1))" "$npm_container_name" "$npm_network" "$npm_gateway"
+        done
+        read -r -p "请选择 [1-${#npm_targets[@]}]：" selection
+        if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#npm_targets[@]} )); then
+          error "无效选项：$selection"
+          return 1
+        fi
+        npm_target="${npm_targets[$((selection - 1))]}"
+      fi
+      IFS=$'\t' read -r npm_container_id npm_container_name npm_network npm_gateway <<< "$npm_target"
+      if ! is_local_upstream_host "$npm_gateway"; then
+        error "Docker 网关 ${npm_gateway} 未出现在本机网卡地址中，无法安全作为 Kopia 监听地址。"
+        return 1
+      fi
+      bind_host="$npm_gateway"
+      info "检测到 NPM 容器 ${npm_container_name}，网络 ${npm_network}，网关 ${npm_gateway}。"
+      info "Kopia 将仅监听 Docker 网络网关；该模式不直接开放公网端口。"
+      warn "同一 Docker 网络中的其他容器也可访问 ${npm_gateway}:${port}。"
+      ;;
+    3)
       bind_host="0.0.0.0"
       warn "此端口将接受所有 IPv4 网络接口的连接，请仅在防火墙允许可信来源。"
       ;;
@@ -1232,7 +1466,11 @@ manage_kopia_listener() {
 
   warn "将为 $unit 创建 CaddyCtl 管理的启动覆盖文件，并重启 Kopia 服务。"
   confirm_action "确认修改 Kopia 监听地址为 ${bind_host}:${port}？" || { info "已取消。"; return 0; }
-  apply_kopia_listener_address "$pid" "$port" "$bind_host"
+  if apply_kopia_listener_address "$pid" "$port" "$bind_host"; then
+    if [[ "$mode" == "2" ]]; then
+      verify_npm_gateway_connection "$npm_container_id" "$npm_container_name" "$npm_gateway" "$port" || true
+    fi
+  fi
 }
 
 docker_mapping_for_host_port() {
@@ -1323,6 +1561,12 @@ show_native_listener_launch_info() {
   user="$(ps -o user= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   process="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   parent_process="$(ps -o comm= -p "$ppid" 2>/dev/null | tr -d ' ' || true)"
+  if [[ "$ppid" == "1" ]]; then
+    printf '启动方式：已脱离终端的手工命令（由 systemd / PID 1 收养，但不是 systemd 服务）\n'
+    printf '进程：%s | PID：%s | 用户：%s\n' "${process:-未知}" "$pid" "${user:-未知}"
+    info "下一步：可在 Kopia 菜单中选择接管为 CaddyCtl 管理的 systemd 服务。"
+    return 0
+  fi
   printf '启动方式：手工命令、脚本或面板（未识别为 systemd 服务）\n'
   printf '进程：%s | PID：%s | 用户：%s | 父进程：%s（PID %s）\n' \
     "${process:-未知}" "$pid" "${user:-未知}" "${parent_process:-未知}" "${ppid:-未知}"
@@ -1333,7 +1577,7 @@ local_service_listener_assistant() {
   local port listener process docker_mapping container_id container_name container_port host_ip
 
   printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
-  info "先列出本机服务，再输入需要查看或修改的端口。自动修改目前仅支持 systemd 启动的 Kopia。"
+  info "先列出本机服务，再输入需要查看或修改的端口。可将手工启动的 Kopia 接管为 systemd 服务。"
   show_all_local_listeners
   read -r -p "输入需要管理的 TCP 端口（直接回车返回）：" port
   [[ -n "$port" ]] || return 0
