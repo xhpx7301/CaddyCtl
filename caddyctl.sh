@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.11"
+readonly MANAGER_VERSION="3.3.12"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1131,31 +1131,31 @@ find_npm_containers() {
 
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
-  while IFS=$'\t' read -r container_id image container_name; do
+  while IFS='|' read -r container_id image container_name; do
     is_npm_container "$image" "$container_name" || continue
     printf '%s\t%s\t%s\n' "$container_id" "$container_name" "$image"
-  done < <(docker ps --format '{{printf "%s\t%s\t%s\n" .ID .Image .Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{.ID}}|{{.Image}}|{{.Names}}' 2>/dev/null)
 }
 
 docker_gateway_targets_for_container() {
   local container_reference="$1"
   local container_id container_name network gateway
 
-  IFS=$'\t' read -r container_id container_name < <(docker inspect --format '{{printf "%s\t%s\n" .Id .Name}}' "$container_reference" 2>/dev/null)
+  IFS='|' read -r container_id container_name < <(docker inspect --format '{{.Id}}|{{.Name}}' "$container_reference" 2>/dev/null)
   [[ -n "$container_id" && -n "$container_name" ]] || return 0
   container_name="${container_name#/}"
-  while IFS=$'\t' read -r network gateway; do
+  while IFS='|' read -r network gateway; do
     is_valid_ipv4 "$gateway" || continue
     printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$network" "$gateway"
-  done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\t%s\n" $name $network.Gateway}}{{end}}' "$container_reference" 2>/dev/null)
+  done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}|{{$network.Gateway}}{{println}}{{end}}' "$container_reference" 2>/dev/null)
 }
 
 show_running_docker_containers() {
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
 
-  printf '\n运行中的 Docker 容器（名称 | 镜像）：\n'
-  docker ps --format '{{.Names}} | {{.Image}}' 2>/dev/null
+  printf '\n运行中的 Docker 容器（短 ID | 名称 | 镜像）：\n'
+  docker ps --format '{{.ID}} | {{.Names}} | {{.Image}}' 2>/dev/null
 }
 
 docker_network_mode_for_container() {
@@ -1168,10 +1168,10 @@ find_npm_gateway_targets() {
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
 
-  while IFS=$'\t' read -r container_id image container_name; do
+  while IFS='|' read -r container_id image container_name; do
     is_npm_container "$image" "$container_name" || continue
     docker_gateway_targets_for_container "$container_id"
-  done < <(docker ps --format '{{printf "%s\t%s\t%s\n" .ID .Image .Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{.ID}}|{{.Image}}|{{.Names}}' 2>/dev/null)
 }
 
 verify_npm_gateway_connection() {
@@ -1257,7 +1257,7 @@ apply_kopia_listener_address() {
   local bind_host="$3"
   local unit wrapper_dir wrapper_path override_dir override_path
   local previous_wrapper="" previous_override="" had_wrapper="false" had_override="false"
-  local temp_wrapper temp_override arg
+  local temp_wrapper temp_override arg attempt listener_ready="false"
   local -a command filtered
   local i has_server="false" has_start="false"
 
@@ -1336,7 +1336,16 @@ apply_kopia_listener_address() {
   install -m 0600 "$temp_override" "$override_path"
   rm -f -- "$temp_wrapper" "$temp_override"
   systemctl daemon-reload
-  if systemctl restart "$unit"; then
+  if systemctl restart "$unit" && systemctl is-active --quiet "$unit"; then
+    for ((attempt = 1; attempt <= 10; attempt++)); do
+      if generic_listener_is_listening_on "$port" "$bind_host"; then
+        listener_ready="true"
+        break
+      fi
+      sleep 1
+    done
+  fi
+  if [[ "$listener_ready" == "true" ]]; then
     rm -f -- "$previous_wrapper" "$previous_override"
     success "Kopia 监听地址已更新为 ${bind_host}:${port}。"
     if [[ "$bind_host" == "127.0.0.1" ]]; then
@@ -1346,7 +1355,7 @@ apply_kopia_listener_address() {
     return 0
   fi
 
-  error "Kopia 重启失败，正在恢复原有启动配置。"
+  error "Kopia 重启或监听验证失败，正在恢复原有启动配置。"
   if [[ "$had_wrapper" == "true" ]]; then
     install -m 0700 "$previous_wrapper" "$wrapper_path"
   else
@@ -1848,14 +1857,14 @@ docker_mapping_for_host_port() {
 
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
-  while IFS=$'\t' read -r container_id container_name; do
+  while IFS='|' read -r container_id container_name; do
     mappings="$(docker inspect --format '{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s|%s|%s\n" $port .HostIp .HostPort}}{{end}}{{end}}' "$container_id" 2>/dev/null || true)"
     while IFS='|' read -r container_port host_ip mapped_port; do
       [[ "$mapped_port" == "$host_port" ]] || continue
       printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$container_port" "$host_ip"
       return 0
     done <<< "$mappings"
-  done < <(docker ps --format '{{printf "%s\t%s\n" .ID .Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{.ID}}|{{.Names}}' 2>/dev/null)
 }
 
 docker_container_network_names() {
