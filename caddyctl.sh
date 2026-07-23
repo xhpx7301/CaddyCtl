@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.2.0"
+readonly MANAGER_VERSION="3.3.0"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1228,8 +1228,71 @@ manage_kopia_listener() {
   apply_kopia_listener_address "$pid" "$port" "$bind_host"
 }
 
+docker_mapping_for_host_port() {
+  local host_port="$1"
+  local container_id container_name mappings container_port host_ip mapped_port
+
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  while IFS=$'\t' read -r container_id container_name; do
+    mappings="$(docker inspect --format '{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s|%s|%s\n" $port .HostIp .HostPort}}{{end}}{{end}}' "$container_id" 2>/dev/null || true)"
+    while IFS='|' read -r container_port host_ip mapped_port; do
+      [[ "$mapped_port" == "$host_port" ]] || continue
+      printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$container_port" "$host_ip"
+      return 0
+    done <<< "$mappings"
+  done < <(docker ps --format '{{.ID}}\t{{.Names}}' 2>/dev/null)
+}
+
+show_docker_mapping_plan() {
+  local container_id="$1"
+  local container_name="$2"
+  local container_port="$3"
+  local current_host_ip="$4"
+  local host_port="$5"
+  local mode bind_host internal_port project service workdir config_files
+
+  internal_port="${container_port%/tcp}"
+  project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container_id" 2>/dev/null || true)"
+  service="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
+  workdir="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$container_id" 2>/dev/null || true)"
+  config_files="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$container_id" 2>/dev/null || true)"
+
+  printf '\n%sDocker 容器端口映射%s\n' "$BOLD" "$RESET"
+  printf '容器：%s\n当前映射：%s:%s -> 容器 %s\n' \
+    "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
+  printf '  1. 仅服务器本机：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
+  printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-2]：" mode
+
+  case "$mode" in
+    1) bind_host="127.0.0.1" ;;
+    2)
+      bind_host="0.0.0.0"
+      warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
+      ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+
+  printf '\n请将 Compose 中对应服务的 ports 映射改为：\n\n'
+  printf 'services:\n  %s:\n    ports:\n      - "%s:%s:%s"\n' \
+    "${service:-<服务名>}" "$bind_host" "$host_port" "$internal_port"
+  printf '\n'
+  if [[ -n "$project" ]]; then
+    info "检测到 Compose 项目：$project"
+    [[ -n "$workdir" ]] && info "项目目录：$workdir"
+    [[ -n "$config_files" ]] && info "配置文件：$config_files"
+    info "保存 Compose 修改后，在项目目录执行 docker compose up -d 以重建容器。"
+  else
+    warn "未检测到 Compose 标签。Docker 无法原地修改端口映射，需要使用新的 -p 参数重建该容器。"
+  fi
+  warn "为避免丢失容器环境变量、卷和网络，此菜单不会自动重建 Docker 容器。"
+}
+
 local_service_listener_assistant() {
-  local port listener process
+  local port listener process docker_mapping container_id container_name container_port host_ip
 
   printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
   info "先列出本机服务，再输入需要查看或修改的端口。自动修改目前仅支持 systemd 启动的 Kopia。"
@@ -1246,11 +1309,17 @@ local_service_listener_assistant() {
     return 0
   fi
   printf '\n%s端口 %s 的监听详情%s\n%s\n' "$BOLD" "$port" "$RESET" "$listener"
+  docker_mapping="$(docker_mapping_for_host_port "$port")"
+  if [[ -n "$docker_mapping" ]]; then
+    IFS=$'\t' read -r container_id container_name container_port host_ip <<< "$docker_mapping"
+    show_docker_mapping_plan "$container_id" "$container_name" "$container_port" "$host_ip" "$port"
+    return
+  fi
   process="$(printf '%s\n' "$listener" | listener_process_from_details)"
   if [[ "$process" == "kopia" ]]; then
     manage_kopia_listener "$port" "$listener"
   else
-    info "已识别进程：${process:-未知}。当前仅支持自动修改 systemd 启动的 Kopia；其他服务请在其自身配置中调整监听地址。"
+    info "已识别进程：${process:-未知}。当前仅支持自动修改 systemd 启动的 Kopia；其他原生服务请在其自身配置中调整监听地址。"
   fi
 }
 
