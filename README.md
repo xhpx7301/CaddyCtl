@@ -9,7 +9,7 @@ Caddy，并可将 HTTPS 请求反向代理到 Docker 容器中的服务。
 
 ```bash
 caddyctl                         # 打开管理菜单
-caddyctl --install               # 安装 Caddy 与管理入口，然后打开管理菜单
+caddyctl --install               # 直接安装 Caddy，然后打开管理菜单
 caddy version                    # 官方 Caddy CLI
 caddy validate --config /etc/caddy/Caddyfile
 ```
@@ -22,11 +22,26 @@ caddy validate --config /etc/caddy/Caddyfile
 curl -fsSL https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/install.sh | bash
 ```
 
-安装脚本会下载 `caddyctl.sh`、完成安装，并自动打开管理菜单。之后也可使用：
+安装脚本会安装 `CaddyCtl` 管理入口并自动打开菜单，不会立即安装 Caddy。需要时
+在菜单中选择“安装或更新 Caddy”。之后也可使用：
 
 ```bash
 caddyctl
 ```
+
+菜单中的“安装或更新 Caddy”会根据当前状态执行安装或软件包更新；“更新
+CaddyCtl 管理菜单”只下载并更新管理脚本，不会修改 Caddy 配置、站点或证书。
+
+“卸载 Caddy 或 CaddyCtl”提供独立选项：卸载 Caddy 时保留配置、证书和管理菜单；
+卸载 CaddyCtl 时保留 Caddy、配置和证书；完全卸载会移除两者，但仍保留配置、证书
+和数据目录。
+
+菜单中的“检测上游监听与连通性”可检查已配置站点或手动填写的上游地址。对本机
+服务会显示监听地址；对 HTTP/HTTPS 服务会测试连通性。返回 `401` 或 `403` 表示
+服务已连通，只是需要认证或当前没有访问权限。
+
+“受支持服务安全助手”当前支持 Kopia：它只会识别本机 Kopia 监听进程并生成监听
+地址调整方案，不会自动更改服务配置或重启服务。
 
 也可以克隆仓库后在本地运行：
 

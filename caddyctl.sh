@@ -7,7 +7,8 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="2.1.0"
+readonly MANAGER_VERSION="2.7.0"
+readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITES_DIR="/etc/caddy/sites"
@@ -41,6 +42,14 @@ pause_menu() {
   read -r -p "按 Enter 键返回主菜单..." _ || true
 }
 
+confirm_action() {
+  local prompt="$1"
+  local answer
+
+  read -r -p "$prompt [y/N]：" answer || return 1
+  [[ "$answer" =~ ^[Yy]$ ]]
+}
+
 manager_source() {
   local source_path="${BASH_SOURCE[0]}"
   readlink -f "$source_path" 2>/dev/null || printf '%s\n' "$source_path"
@@ -49,7 +58,7 @@ manager_source() {
 show_command_usage() {
   printf '%s\n' "$PROJECT_NAME 是 Caddy 的管理菜单。"
   printf '%s\n' "用法：caddyctl [--install]"
-  printf '%s\n' "  --install  安装 Caddy 和 caddyctl 管理入口，然后打开管理菜单"
+  printf '%s\n' "  --install  直接安装 Caddy 并打开管理菜单"
   printf '%s\n' "官方 Caddy CLI 保持不变，例如：caddy version"
 }
 
@@ -147,6 +156,69 @@ fi
 exec sudo "$MANAGER_SCRIPT" "$@"
 WRAPPER
   chmod 0755 "$MANAGER_COMMAND"
+}
+
+download_manager_script() {
+  local destination="$1"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --proto '=https' --tlsv1.2 "$MANAGER_SOURCE_URL" -o "$destination"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$destination" "$MANAGER_SOURCE_URL"
+  else
+    error "需要 curl 或 wget 才能下载 CaddyCtl 更新。"
+    return 1
+  fi
+}
+
+manager_version_from_file() {
+  local path="$1"
+  sed -n 's/^readonly MANAGER_VERSION="\([^"]*\)"$/\1/p' "$path" | head -n 1
+}
+
+update_manager() {
+  local temp_file current_version updated_version
+
+  temp_file="$(mktemp)" || {
+    error "无法创建更新临时文件。"
+    return 1
+  }
+  current_version="$MANAGER_VERSION"
+  info "正在下载 CaddyCtl 管理菜单更新..."
+  if ! download_manager_script "$temp_file"; then
+    rm -f -- "$temp_file"
+    error "下载更新失败，当前版本保持不变。"
+    return 1
+  fi
+  if ! grep -Fq 'readonly PROJECT_NAME="CaddyCtl"' "$temp_file" \
+      || ! bash -n "$temp_file"; then
+    rm -f -- "$temp_file"
+    error "下载的脚本校验失败，当前版本保持不变。"
+    return 1
+  fi
+
+  updated_version="$(manager_version_from_file "$temp_file")"
+  if [[ -z "$updated_version" ]]; then
+    rm -f -- "$temp_file"
+    error "下载的脚本缺少版本信息，当前版本保持不变。"
+    return 1
+  fi
+  if [[ -f "$MANAGER_SCRIPT" ]] && cmp -s "$temp_file" "$MANAGER_SCRIPT"; then
+    rm -f -- "$temp_file"
+    success "CaddyCtl 已是最新版本（$current_version）。"
+    return 0
+  fi
+
+  backup_file "$MANAGER_SCRIPT" "caddyctl-before-update"
+  install -d -m 0755 "$MANAGER_DIR"
+  if ! install -m 0755 "$temp_file" "$MANAGER_SCRIPT"; then
+    rm -f -- "$temp_file"
+    error "写入 CaddyCtl 更新失败，当前版本保持不变。"
+    return 1
+  fi
+  rm -f -- "$temp_file"
+  success "CaddyCtl 已更新：$current_version -> $updated_version"
+  info "更新将在下次打开 caddyctl 菜单时完全生效。"
 }
 
 initialize_caddyfile() {
@@ -299,17 +371,21 @@ update_caddy() {
   success "当前版本：$($REAL_CADDY version 2>/dev/null || printf '未知')"
 }
 
-uninstall_caddy() {
-  local answer package_manager
+install_or_update_caddy() {
+  if [[ -x "$REAL_CADDY" ]]; then
+    update_caddy
+  else
+    install_caddy
+  fi
+}
+
+remove_caddy_package() {
+  local package_manager
 
   if [[ ! -x "$REAL_CADDY" ]]; then
-    warn "Caddy 当前未安装。管理菜单仍保留，可用于重新安装。"
+    warn "Caddy 当前未安装。"
     return 0
   fi
-
-  warn "卸载将停止反向代理，但默认保留 /etc/caddy 和 /var/lib/caddy。"
-  read -r -p "输入 uninstall 确认卸载：" answer
-  [[ "$answer" == "uninstall" ]] || { info "已取消。"; return 0; }
 
   backup_file "$CADDYFILE" "Caddyfile-before-uninstall"
   systemctl disable --now caddy >/dev/null 2>&1 || true
@@ -326,8 +402,66 @@ uninstall_caddy() {
     return 1
   fi
 
+  return 0
+}
+
+uninstall_caddy() {
+  if [[ ! -x "$REAL_CADDY" ]]; then
+    warn "Caddy 当前未安装。管理菜单仍保留，可用于重新安装。"
+    return 0
+  fi
+
+  warn "卸载将停止反向代理，但默认保留 /etc/caddy 和 /var/lib/caddy。"
+  confirm_action "确认卸载 Caddy？" || { info "已取消。"; return 0; }
+
+  remove_caddy_package || return 1
   success "Caddy 已卸载，配置、证书数据和管理菜单均已保留。"
-  info "需要重新安装时，输入 caddyctl 并选择“安装”。"
+  info "需要重新安装时，输入 caddyctl 并选择“安装或更新 Caddy”。"
+}
+
+remove_manager_files() {
+  backup_file "$MANAGER_SCRIPT" "caddyctl-before-uninstall"
+  backup_file "$MANAGER_COMMAND" "caddyctl-command-before-uninstall"
+  rm -f -- "$MANAGER_COMMAND" "$MANAGER_SCRIPT"
+  rmdir -- "$MANAGER_DIR" 2>/dev/null || true
+}
+
+uninstall_manager() {
+  warn "这将删除 caddyctl 命令和管理脚本，但不会修改 Caddy、站点配置或证书。"
+  confirm_action "确认卸载 CaddyCtl 管理菜单？" || { info "已取消。"; return 0; }
+
+  remove_manager_files
+
+  success "CaddyCtl 管理菜单已卸载。Caddy、配置和证书保持不变。"
+}
+
+uninstall_everything() {
+  warn "这将卸载 Caddy 和 CaddyCtl 管理菜单，停止反向代理服务。"
+  warn "站点配置、Caddyfile、证书和数据目录将被保留，不会删除。"
+  confirm_action "确认完全卸载 Caddy 和 CaddyCtl？" || { info "已取消。"; return 0; }
+
+  remove_caddy_package || return 1
+  remove_manager_files
+  success "Caddy 和 CaddyCtl 管理菜单已卸载。配置、证书和数据目录保持不变。"
+}
+
+uninstall_menu() {
+  local choice
+
+  printf '\n%s请选择卸载内容%s\n' "$BOLD" "$RESET"
+  printf '  1. 卸载 Caddy（保留配置、证书和 CaddyCtl）\n'
+  printf '  2. 卸载 CaddyCtl 管理菜单（保留 Caddy、配置和证书）\n'
+  printf '  3. 完全卸载 Caddy 和 CaddyCtl（保留配置和证书）\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-3]：" choice
+
+  case "$choice" in
+    1) uninstall_caddy ;;
+    2) uninstall_manager ;;
+    3) uninstall_everything ;;
+    0) return 0 ;;
+    *) error "无效选项：$choice"; return 1 ;;
+  esac
 }
 
 is_valid_domain() {
@@ -378,13 +512,17 @@ test_upstream_connection() {
   local upstream_host="$1"
   local upstream_port="$2"
   local upstream_scheme="$3"
-  local formatted_host
+  local formatted_host http_status
 
   command -v curl >/dev/null 2>&1 || return 0
   formatted_host="$(format_upstream_host "$upstream_host")"
-  if curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
-      "$upstream_scheme://$formatted_host:$upstream_port/"; then
-    success "宿主机可以访问上游服务。"
+  if http_status="$(curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
+      -w '%{http_code}' "$upstream_scheme://$formatted_host:$upstream_port/")"; then
+    if [[ "$http_status" == "401" || "$http_status" == "403" ]]; then
+      success "已连通上游服务（HTTP $http_status，需要认证或无访问权限）。"
+    else
+      success "已连通上游服务（HTTP $http_status）。"
+    fi
     return 0
   fi
 
@@ -791,8 +929,231 @@ show_config() {
   [[ "$answer" =~ ^[Yy]$ ]] && show_raw_config
 }
 
+is_local_upstream_host() {
+  local host="$1"
+
+  case "$host" in
+    localhost|127.0.0.1|::1) return 0 ;;
+  esac
+
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$host"
+}
+
+show_local_listener() {
+  local port="$1"
+  local listener
+
+  printf '\n%s本机端口监听结果%s\n' "$BOLD" "$RESET"
+  info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
+  if command -v ss >/dev/null 2>&1; then
+    listener="$(ss -ltnpH "sport = :$port" 2>/dev/null || true)"
+  elif command -v netstat >/dev/null 2>&1; then
+    listener="$(netstat -ltnp 2>/dev/null | awk -v port=":$port" '$4 ~ (port "$")')"
+  else
+    warn "未找到 ss 或 netstat，无法查看本机监听状态。"
+    return 0
+  fi
+
+  if [[ -n "$listener" ]]; then
+    printf '%s\n' "$listener"
+  else
+    warn "未发现 TCP 端口 $port 处于监听状态。"
+  fi
+}
+
+diagnose_upstream() {
+  local mode domain target settings upstream_scheme upstream_host upstream_port
+
+  printf '\n%s检测上游监听与连通性%s\n' "$BOLD" "$RESET"
+  printf '  1. 检测已配置的反向代理\n'
+  printf '  2. 手动填写上游地址和端口\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-2]：" mode
+
+  case "$mode" in
+    1)
+      if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
+        warn "暂未配置反向代理站点。"
+        return 0
+      fi
+      printf '\n已配置站点（域名 -> 上游）：\n'
+      show_site_choices
+      read -r -p "输入需要检测的完整域名：" domain
+      domain="${domain,,}"
+      if ! is_valid_domain "$domain"; then
+        error "域名格式不正确。"
+        return 1
+      fi
+      target="$(site_path_for_domain "$domain")"
+      settings="$(read_proxy_settings "$target")" || {
+        error "无法识别该站点的上游地址；请改用手动检测。"
+        return 1
+      }
+      IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
+      ;;
+    2)
+      read -r -p "上游地址（IP 或主机名）：" upstream_host
+      upstream_host="${upstream_host#[}"
+      upstream_host="${upstream_host%]}"
+      if ! is_valid_upstream_host "$upstream_host"; then
+        error "上游 IP/主机名格式不正确。"
+        return 1
+      fi
+      read -r -p "上游端口：" upstream_port
+      if ! is_valid_port "$upstream_port"; then
+        error "端口必须是 1-65535 之间的整数。"
+        return 1
+      fi
+      read -r -p "上游协议 [http/https，默认 http]：" upstream_scheme
+      upstream_scheme="${upstream_scheme:-http}"
+      if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
+        error "上游协议只能是 http 或 https。"
+        return 1
+      fi
+      ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+
+  printf '\n检测目标：%s://%s:%s\n' \
+    "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
+  if is_local_upstream_host "$upstream_host"; then
+    show_local_listener "$upstream_port"
+  else
+    info "$upstream_host 不属于本机地址，无法从本机读取其监听状态；将只检测连通性。"
+  fi
+
+  printf '\n%sHTTP/HTTPS 连通性%s\n' "$BOLD" "$RESET"
+  test_upstream_connection "$upstream_host" "$upstream_port" "$upstream_scheme" || true
+}
+
+kopia_listener_details() {
+  local port="$1"
+
+  command -v ss >/dev/null 2>&1 || return 1
+  ss -ltnpH "sport = :$port" 2>/dev/null | grep -i 'kopia' || true
+}
+
+find_kopia_service_unit() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl list-units --type=service --all --no-legend 'kopia*' 2>/dev/null \
+    | awk 'NF { print $1; exit }'
+}
+
+show_kopia_binding_plan() {
+  local port="$1"
+  local mode bind_host service_unit
+
+  printf '\n%sKopia 监听地址方案（仅预览）%s\n' "$BOLD" "$RESET"
+  printf '  1. 仅本机访问：127.0.0.1:%s（推荐由 Caddy 反向代理）\n' "$port"
+  printf '  2. 仅指定服务器 IP 访问\n'
+  printf '  3. 所有 IPv4 地址：0.0.0.0:%s（需配合防火墙）\n' "$port"
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-3]：" mode
+
+  case "$mode" in
+    1) bind_host="127.0.0.1" ;;
+    2)
+      read -r -p "输入本机要监听的 IP：" bind_host
+      if ! is_local_upstream_host "$bind_host" || [[ "$bind_host" == "127.0.0.1" || "$bind_host" == "::1" ]]; then
+        error "请输入服务器实际配置的非回环 IP。"
+        return 1
+      fi
+      ;;
+    3)
+      bind_host="0.0.0.0"
+      warn "所有 IPv4 地址均可直接访问该端口，请限制防火墙来源。"
+      ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+
+  printf '\n建议的 Kopia 启动参数：\n\n'
+  printf '  kopia server start --address=%s:%s\n' "$(format_upstream_host "$bind_host")" "$port"
+  printf '\n'
+  if [[ "$bind_host" == "127.0.0.1" ]]; then
+    info "应用此方案后，请在“修改现有反向代理”中将上游地址设为 127.0.0.1。"
+  fi
+
+  service_unit="$(find_kopia_service_unit)"
+  if [[ -n "$service_unit" ]]; then
+    info "检测到 systemd 服务：$service_unit"
+    info "请通过 systemctl edit $service_unit 创建覆盖配置，并保留原有 Kopia 启动参数。"
+  else
+    info "未检测到名为 kopia 的 systemd 服务；请在当前 Kopia 的启动脚本、面板或服务配置中更新监听参数。"
+  fi
+  warn "此助手不会自动修改或重启 Kopia，避免覆盖认证、仓库路径等现有启动参数。"
+}
+
+kopia_safe_assistant() {
+  local mode domain target settings upstream_scheme upstream_host upstream_port listener
+
+  printf '\n%s受支持服务安全助手：Kopia%s\n' "$BOLD" "$RESET"
+  info "此功能仅生成安全的监听地址调整方案，不会自动修改第三方服务。"
+  printf '  1. 从已配置的反向代理选择 Kopia 上游\n'
+  printf '  2. 手动填写 Kopia 上游地址和端口\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-2]：" mode
+
+  case "$mode" in
+    1)
+      if ! compgen -G "${SITES_DIR}/*.caddy" >/dev/null 2>&1; then
+        warn "暂未配置反向代理站点。"
+        return 0
+      fi
+      printf '\n已配置站点（域名 -> 上游）：\n'
+      show_site_choices
+      read -r -p "输入对应 Kopia 站点的完整域名：" domain
+      domain="${domain,,}"
+      if ! is_valid_domain "$domain"; then
+        error "域名格式不正确。"
+        return 1
+      fi
+      target="$(site_path_for_domain "$domain")"
+      settings="$(read_proxy_settings "$target")" || {
+        error "无法识别该站点的上游地址；请改用手动填写。"
+        return 1
+      }
+      IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
+      ;;
+    2)
+      read -r -p "Kopia 上游地址（必须是本机 IP）：" upstream_host
+      upstream_host="${upstream_host#[}"
+      upstream_host="${upstream_host%]}"
+      if ! is_valid_upstream_host "$upstream_host"; then
+        error "上游 IP/主机名格式不正确。"
+        return 1
+      fi
+      read -r -p "Kopia 上游端口：" upstream_port
+      if ! is_valid_port "$upstream_port"; then
+        error "端口必须是 1-65535 之间的整数。"
+        return 1
+      fi
+      ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+
+  if ! is_local_upstream_host "$upstream_host"; then
+    error "$upstream_host 不是本机地址，安全助手无法读取远程服务的监听状态。"
+    return 1
+  fi
+  listener="$(kopia_listener_details "$upstream_port")"
+  if [[ -z "$listener" ]]; then
+    warn "未在本机端口 $upstream_port 识别到 Kopia 监听进程。"
+    show_local_listener "$upstream_port"
+    info "请确认端口和服务名称；此助手当前仅支持由 kopia 进程监听的服务。"
+    return 1
+  fi
+
+  success "已识别 Kopia 监听进程："
+  printf '%s\n' "$listener"
+  show_kopia_binding_plan "$upstream_port"
+}
+
 delete_proxy() {
-  local domain target rollback_file answer
+  local domain target rollback_file
 
   if [[ ! -x "$REAL_CADDY" ]]; then
     error "Caddy 尚未安装。"
@@ -820,8 +1181,7 @@ delete_proxy() {
     return 1
   fi
 
-  read -r -p "确认删除 $domain 的代理配置？[y/N]：" answer
-  [[ "$answer" =~ ^[Yy]$ ]] || { info "已取消。"; return 0; }
+  confirm_action "确认删除 $domain 的反向代理配置？" || { info "已取消。"; return 0; }
 
   rollback_file="$(mktemp)"
   cp -a -- "$target" "$rollback_file"
@@ -917,9 +1277,9 @@ draw_menu() {
   status_line
   printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
   printf '  1. 查看运行状态\n'
-  printf '  2. 安装或修复 Caddy\n'
-  printf '  3. 更新 Caddy\n'
-  printf '  4. 卸载 Caddy（保留配置和证书）\n'
+  printf '  2. 安装或更新 Caddy\n'
+  printf '  3. 更新 CaddyCtl 管理菜单\n'
+  printf '  4. 卸载 Caddy 或 CaddyCtl\n'
   printf '  5. 新增反向代理\n'
   printf '  6. 修改现有反向代理\n'
   printf '  7. 查看当前反向代理配置\n'
@@ -927,6 +1287,8 @@ draw_menu() {
   printf '  9. 校验并重载 Caddy\n'
   printf ' 10. 查看 Caddy 服务日志\n'
   printf ' 11. 查看端口监听与 Docker 映射\n'
+  printf ' 12. 检测上游监听与连通性\n'
+  printf ' 13. 受支持服务安全助手（Kopia）\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
 }
@@ -943,14 +1305,14 @@ main_menu() {
   local choice
   while true; do
     draw_menu
-    read -r -p "请选择 [0-11]：" choice || exit 0
+    read -r -p "请选择 [0-13]：" choice || exit 0
     printf '\n'
 
     case "$choice" in
       1) show_status_detail; pause_menu ;;
-      2) install_caddy; pause_menu ;;
-      3) update_caddy; pause_menu ;;
-      4) uninstall_caddy; pause_menu ;;
+      2) install_or_update_caddy; pause_menu ;;
+      3) update_manager; pause_menu ;;
+      4) uninstall_menu; pause_menu ;;
       5) configure_proxy; pause_menu ;;
       6) edit_proxy_config; pause_menu ;;
       7) show_config; pause_menu ;;
@@ -958,6 +1320,8 @@ main_menu() {
       9) validate_and_reload; pause_menu ;;
       10) show_logs; pause_menu ;;
       11) show_listeners; pause_menu ;;
+      12) diagnose_upstream; pause_menu ;;
+      13) kopia_safe_assistant; pause_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac
@@ -972,6 +1336,14 @@ fi
 if [[ $# -eq 1 && "$1" == "--install" ]]; then
   require_root "$@"
   install_caddy || exit $?
+  main_menu
+  exit 0
+fi
+
+if [[ $# -eq 1 && "$1" == "--install-manager" ]]; then
+  require_root "$@"
+  install_manager_command
+  success "CaddyCtl 管理菜单已安装。请在菜单中选择“安装或更新 Caddy”继续。"
   main_menu
   exit 0
 fi

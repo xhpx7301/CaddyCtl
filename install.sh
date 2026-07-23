@@ -25,4 +25,4 @@ download_manager() {
 
 download_manager
 chmod 0755 "$MANAGER_SCRIPT"
-bash "$MANAGER_SCRIPT" --install
+bash "$MANAGER_SCRIPT" --install-manager
