@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.9"
+readonly MANAGER_VERSION="3.3.11"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1134,20 +1134,20 @@ find_npm_containers() {
   while IFS=$'\t' read -r container_id image container_name; do
     is_npm_container "$image" "$container_name" || continue
     printf '%s\t%s\t%s\n' "$container_id" "$container_name" "$image"
-  done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{printf "%s\t%s\t%s\n" .ID .Image .Names}}' 2>/dev/null)
 }
 
 docker_gateway_targets_for_container() {
   local container_reference="$1"
   local container_id container_name network gateway
 
-  IFS=$'\t' read -r container_id container_name < <(docker inspect --format '{{.Id}}\t{{.Name}}' "$container_reference" 2>/dev/null)
+  IFS=$'\t' read -r container_id container_name < <(docker inspect --format '{{printf "%s\t%s\n" .Id .Name}}' "$container_reference" 2>/dev/null)
   [[ -n "$container_id" && -n "$container_name" ]] || return 0
   container_name="${container_name#/}"
   while IFS=$'\t' read -r network gateway; do
     is_valid_ipv4 "$gateway" || continue
     printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$network" "$gateway"
-  done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\\t%s\\n" $name $network.Gateway}}{{end}}' "$container_reference" 2>/dev/null)
+  done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\t%s\n" $name $network.Gateway}}{{end}}' "$container_reference" 2>/dev/null)
 }
 
 show_running_docker_containers() {
@@ -1171,7 +1171,7 @@ find_npm_gateway_targets() {
   while IFS=$'\t' read -r container_id image container_name; do
     is_npm_container "$image" "$container_name" || continue
     docker_gateway_targets_for_container "$container_id"
-  done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{printf "%s\t%s\t%s\n" .ID .Image .Names}}' 2>/dev/null)
 }
 
 verify_npm_gateway_connection() {
@@ -1513,7 +1513,7 @@ manage_kopia_listener() {
     esac
   fi
   printf '  1. 仅服务器本机：127.0.0.1:%s（供宿主机上的 Caddy、Nginx 等反代访问）\n' "$port"
-  printf '  2. NPM 容器 Docker 网络网关（自动识别并验证容器连通性）\n'
+  printf '  2. Docker NPM 访问宿主机服务（网关模式，自动识别并验证）\n'
   printf '  3. 允许服务器公网 IP 访问：0.0.0.0:%s（需配合防火墙）\n' "$port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-3]：" mode
@@ -1581,6 +1581,267 @@ manage_kopia_listener() {
   fi
 }
 
+generic_systemd_rollback_paths() {
+  local unit="$1"
+  local port="$2"
+  local rollback_dir="${MANAGER_DIR}/listener-rollbacks"
+
+  printf '%s\t%s\n' \
+    "${rollback_dir}/${unit}-${port}.rollback" \
+    "${rollback_dir}/${unit}-${port}.before-change.bak"
+}
+
+generic_listener_is_listening_on() {
+  local port="$1"
+  local bind_host="$2"
+  local listener
+
+  listener="$(local_tcp_listener_details "$port")"
+  [[ -n "$listener" ]] || return 1
+  if [[ "$bind_host" == "0.0.0.0" ]]; then
+    grep -Eq "(0\\.0\\.0\\.0|\\*):${port}([^0-9]|$)" <<< "$listener"
+  else
+    grep -Fq -- "${bind_host}:${port}" <<< "$listener"
+  fi
+}
+
+show_generic_systemd_service_details() {
+  local unit="$1"
+
+  printf '\n%s%s 服务详情%s\n' "$BOLD" "$unit" "$RESET"
+  systemctl show "$unit" \
+    --property=Id,Description,ActiveState,SubState,Type,ExecStart,Environment,FragmentPath \
+    --no-pager 2>/dev/null || true
+  printf '\n%s服务定义与覆盖文件%s\n' "$BOLD" "$RESET"
+  systemctl cat "$unit" --no-pager 2>/dev/null || true
+}
+
+prompt_generic_systemd_bind_host() {
+  local port="$1"
+  local mode manual_host manual_container npm_network_mode selection i
+  local npm_target npm_container_id npm_container_name npm_network npm_gateway
+  local -a npm_targets
+
+  GENERIC_BIND_HOST=""
+  GENERIC_NPM_CONTAINER_ID=""
+  GENERIC_NPM_CONTAINER_NAME=""
+  GENERIC_NPM_GATEWAY=""
+  printf '  1. 仅服务器本机：127.0.0.1:%s\n' "$port"
+  printf '  2. Docker NPM 访问宿主机服务（网关模式，自动识别并验证）\n'
+  printf '  3. 允许服务器公网 IP 访问：0.0.0.0:%s\n' "$port"
+  printf '  4. 指定服务器本机 IPv4 地址\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-4]：" mode
+
+  case "$mode" in
+    1) GENERIC_BIND_HOST="127.0.0.1" ;;
+    2)
+      mapfile -t npm_targets < <(find_npm_gateway_targets)
+      if (( ${#npm_targets[@]} == 0 )); then
+        warn "未自动识别到带 IPv4 Docker 网络网关的 Nginx Proxy Manager 容器。"
+        show_running_docker_containers
+        read -r -p "输入 NPM 容器名称或 ID（直接回车返回）:" manual_container
+        [[ -n "$manual_container" ]] || return 1
+        mapfile -t npm_targets < <(docker_gateway_targets_for_container "$manual_container")
+        if (( ${#npm_targets[@]} == 0 )); then
+          npm_network_mode="$(docker_network_mode_for_container "$manual_container")"
+          if [[ "$npm_network_mode" == "host" ]]; then
+            warn "该容器使用 host 网络，请返回并选择“仅服务器本机”模式。"
+          else
+            error "容器 ${manual_container} 未找到 IPv4 Docker 网络网关。"
+          fi
+          return 1
+        fi
+      fi
+      if (( ${#npm_targets[@]} == 1 )); then
+        npm_target="${npm_targets[0]}"
+      else
+        printf '\n检测到多个 NPM Docker 网络：\n'
+        for ((i = 0; i < ${#npm_targets[@]}; i++)); do
+          IFS=$'\t' read -r npm_container_id npm_container_name npm_network npm_gateway <<< "${npm_targets[$i]}"
+          printf '  %d. 容器 %s，网络 %s，网关 %s\n' "$((i + 1))" "$npm_container_name" "$npm_network" "$npm_gateway"
+        done
+        read -r -p "请选择 [1-${#npm_targets[@]}]：" selection
+        if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#npm_targets[@]} )); then
+          error "无效选项：$selection"
+          return 1
+        fi
+        npm_target="${npm_targets[$((selection - 1))]}"
+      fi
+      IFS=$'\t' read -r npm_container_id npm_container_name npm_network npm_gateway <<< "$npm_target"
+      if ! is_local_upstream_host "$npm_gateway"; then
+        error "Docker 网关 ${npm_gateway} 未出现在本机网卡地址中，无法安全作为监听地址。"
+        return 1
+      fi
+      GENERIC_BIND_HOST="$npm_gateway"
+      GENERIC_NPM_CONTAINER_ID="$npm_container_id"
+      GENERIC_NPM_CONTAINER_NAME="$npm_container_name"
+      GENERIC_NPM_GATEWAY="$npm_gateway"
+      info "检测到 NPM 容器 ${npm_container_name}，网络 ${npm_network}，网关 ${npm_gateway}。"
+      ;;
+    3)
+      GENERIC_BIND_HOST="0.0.0.0"
+      warn "此端口将接受所有 IPv4 网络接口的连接，请仅在防火墙允许可信来源。"
+      ;;
+    4)
+      read -r -p "服务器本机 IPv4 地址：" manual_host
+      if ! is_valid_ipv4 "$manual_host" || ! is_local_upstream_host "$manual_host"; then
+        error "该地址不是服务器当前网卡上的 IPv4 地址。"
+        return 1
+      fi
+      GENERIC_BIND_HOST="$manual_host"
+      ;;
+    0) return 1 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+}
+
+apply_generic_systemd_listener_address() {
+  local unit="$1"
+  local port="$2"
+  local config_path="$3"
+  local old_address="$4"
+  local bind_host="$5"
+  local new_address="${bind_host}:${port}"
+  local rollback_manifest rollback_backup rollback_dir temp_file previous_file match_lines
+
+  [[ "$unit" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] || {
+    error "systemd 服务名称不安全，已取消。"
+    return 1
+  }
+  config_path="$(readlink -f -- "$config_path" 2>/dev/null || true)"
+  if [[ -z "$config_path" || ! -f "$config_path" || ! -r "$config_path" || ! -w "$config_path" ]]; then
+    error "配置文件必须是当前可读写的普通文件。"
+    return 1
+  fi
+  if [[ -z "$old_address" || ! "$old_address" == *:* ]]; then
+    error "旧监听地址必须包含地址和端口，例如 0.0.0.0:${port}。"
+    return 1
+  fi
+  if ! grep -Fq -- "$old_address" "$config_path"; then
+    error "配置文件中未找到精确的旧监听地址：${old_address}"
+    return 1
+  fi
+  match_lines="$(grep -Foc -- "$old_address" "$config_path" || true)"
+  if [[ "$match_lines" != "1" ]]; then
+    error "旧监听地址出现在 ${match_lines} 行。请缩小为仅包含该服务监听地址的配置文件后重试。"
+    return 1
+  fi
+  if [[ "$old_address" == "$new_address" ]]; then
+    info "监听地址已是 ${new_address}，无需修改。"
+    return 0
+  fi
+
+  IFS=$'\t' read -r rollback_manifest rollback_backup < <(generic_systemd_rollback_paths "$unit" "$port")
+  rollback_dir="$(dirname "$rollback_manifest")"
+  install -d -m 0700 "$rollback_dir"
+  previous_file="$(mktemp "${rollback_dir}/.${unit}-${port}.previous.XXXXXX")" || return 1
+  temp_file="$(mktemp "$(dirname "$config_path")/.caddyctl-listener.XXXXXX")" || {
+    rm -f -- "$previous_file"
+    return 1
+  }
+  cp -a -- "$config_path" "$previous_file"
+  cp -a -- "$config_path" "$rollback_backup"
+  chown --reference="$config_path" "$temp_file"
+  chmod --reference="$config_path" "$temp_file"
+  awk -v old="$old_address" -v new="$new_address" '
+    {
+      while ((position = index($0, old)) > 0) {
+        $0 = substr($0, 1, position - 1) new substr($0, position + length(old))
+      }
+      print
+    }
+  ' "$config_path" >"$temp_file"
+  mv -f -- "$temp_file" "$config_path"
+  printf '%s\t%s\t%s\t%s\n' "$config_path" "$rollback_backup" "$unit" "$port" >"$rollback_manifest"
+  backup_file "$previous_file" "${unit}-${port}-before-listener-change"
+
+  if systemctl restart "$unit" && systemctl is-active --quiet "$unit" \
+      && generic_listener_is_listening_on "$port" "$bind_host"; then
+    rm -f -- "$previous_file"
+    success "${unit} 监听地址已更新为 ${new_address}。"
+    show_local_listener "$port"
+    return 0
+  fi
+
+  error "服务重启或监听验证失败，正在自动恢复原配置。"
+  cp -a -- "$previous_file" "$config_path"
+  rm -f -- "$previous_file" "$rollback_manifest" "$rollback_backup"
+  systemctl restart "$unit" >/dev/null 2>&1 || true
+  return 1
+}
+
+rollback_generic_systemd_listener_address() {
+  local unit="$1"
+  local port="$2"
+  local rollback_manifest rollback_backup config_path saved_unit saved_port current_copy
+
+  IFS=$'\t' read -r rollback_manifest rollback_backup < <(generic_systemd_rollback_paths "$unit" "$port")
+  if [[ ! -f "$rollback_manifest" ]]; then
+    warn "未找到 ${unit} 端口 ${port} 的 CaddyCtl 手动回滚点。"
+    return 0
+  fi
+  IFS=$'\t' read -r config_path rollback_backup saved_unit saved_port <"$rollback_manifest"
+  if [[ "$saved_unit" != "$unit" || "$saved_port" != "$port" || ! -f "$rollback_backup" || ! -f "$config_path" ]]; then
+    error "回滚记录不完整或已被手工修改，已取消。"
+    return 1
+  fi
+  confirm_action "确认恢复 ${unit} 在修改前的监听配置？" || { info "已取消。"; return 0; }
+  current_copy="$(mktemp "$(dirname "$rollback_manifest")/.${unit}-${port}.current.XXXXXX")" || return 1
+  cp -a -- "$config_path" "$current_copy"
+  cp -a -- "$rollback_backup" "$config_path"
+  if systemctl restart "$unit" && systemctl is-active --quiet "$unit" \
+      && [[ -n "$(local_tcp_listener_details "$port")" ]]; then
+    rm -f -- "$current_copy" "$rollback_manifest" "$rollback_backup"
+    success "已恢复 ${unit} 修改前的监听配置。"
+    show_local_listener "$port"
+    return 0
+  fi
+
+  error "手动回滚后服务未正常启动，正在恢复回滚前配置。"
+  cp -a -- "$current_copy" "$config_path"
+  rm -f -- "$current_copy"
+  systemctl restart "$unit" >/dev/null 2>&1 || true
+  return 1
+}
+
+manage_generic_systemd_listener() {
+  local port="$1"
+  local listener="$2"
+  local unit="$3"
+  local mode config_path old_address
+
+  printf '\n%s通用 systemd 监听地址管理%s\n' "$BOLD" "$RESET"
+  printf '服务：%s\n当前监听：\n%s\n' "$unit" "$listener"
+  printf '此功能仅替换你明确指定的应用配置文件中的精确地址，不修改 systemd ExecStart。\n'
+  printf '  1. 查看服务详情与 systemd 定义\n'
+  printf '  2. 修改应用配置中的监听地址（自动回滚）\n'
+  printf '  3. 恢复上一次由 CaddyCtl 修改的监听配置\n'
+  printf '  0. 返回\n'
+  read -r -p "请选择 [0-3]：" mode
+
+  case "$mode" in
+    1) show_generic_systemd_service_details "$unit" ;;
+    2)
+      prompt_generic_systemd_bind_host "$port" || return 0
+      printf '\n请填写应用自身的配置文件和当前监听地址。\n'
+      printf '旧地址必须与文件内容完全一致，例如 0.0.0.0:%s 或 127.0.0.1:%s。\n' "$port" "$port"
+      read -r -p "应用配置文件绝对路径：" config_path
+      read -r -p "配置中的旧监听地址：" old_address
+      warn "将把 ${config_path} 中唯一的 ${old_address} 替换为 ${GENERIC_BIND_HOST}:${port}，并重启 ${unit}。"
+      confirm_action "确认继续？" || { info "已取消。"; return 0; }
+      if apply_generic_systemd_listener_address "$unit" "$port" "$config_path" "$old_address" "$GENERIC_BIND_HOST"; then
+        if [[ -n "$GENERIC_NPM_CONTAINER_ID" ]]; then
+          verify_npm_gateway_connection "$GENERIC_NPM_CONTAINER_ID" "$GENERIC_NPM_CONTAINER_NAME" "$GENERIC_NPM_GATEWAY" "$port" || true
+        fi
+      fi
+      ;;
+    3) rollback_generic_systemd_listener_address "$unit" "$port" ;;
+    0) return 0 ;;
+    *) error "无效选项：$mode"; return 1 ;;
+  esac
+}
+
 docker_mapping_for_host_port() {
   local host_port="$1"
   local container_id container_name mappings container_port host_ip mapped_port
@@ -1594,7 +1855,7 @@ docker_mapping_for_host_port() {
       printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$container_port" "$host_ip"
       return 0
     done <<< "$mappings"
-  done < <(docker ps --format '{{.ID}}\t{{.Names}}' 2>/dev/null)
+  done < <(docker ps --format '{{printf "%s\t%s\n" .ID .Names}}' 2>/dev/null)
 }
 
 docker_container_network_names() {
@@ -1768,7 +2029,7 @@ show_native_listener_launch_info() {
   unit="$(systemd_unit_for_pid "$pid")"
   if [[ -n "$unit" ]]; then
     printf '启动方式：systemd 服务（%s）\n' "$unit"
-    info "下一步：可根据服务类型修改其配置或启动参数，然后通过 systemctl restart $unit 生效。"
+    info "下一步：Kopia 可自动修改；其他原生服务可使用通用 systemd 配置替换与回滚功能。"
     return 0
   fi
 
@@ -1817,7 +2078,12 @@ local_service_listener_assistant() {
   if [[ "$process" == "kopia" ]]; then
     manage_kopia_listener "$port" "$listener"
   else
-    info "已识别进程：${process:-未知}。当前仅支持自动修改 systemd 启动的 Kopia；其他原生服务请在其自身配置中调整监听地址。"
+    unit="$(systemd_unit_for_pid "$(printf '%s\n' "$listener" | listener_pid_from_details)")"
+    if [[ -n "$unit" ]]; then
+      manage_generic_systemd_listener "$port" "$listener" "$unit"
+    else
+      info "已识别进程：${process:-未知}。该服务不由 systemd 直接管理，请在其自身配置或原管理面板中调整监听地址。"
+    fi
   fi
 }
 
