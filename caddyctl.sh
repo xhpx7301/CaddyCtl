@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.7"
+readonly MANAGER_VERSION="3.3.8"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1113,15 +1113,40 @@ is_valid_ipv4() {
   done
 }
 
+docker_gateway_targets_for_container() {
+  local container_reference="$1"
+  local container_id container_name network gateway
+
+  IFS=$'\t' read -r container_id container_name < <(docker inspect --format '{{.Id}}\t{{.Name}}' "$container_reference" 2>/dev/null)
+  [[ -n "$container_id" && -n "$container_name" ]] || return 0
+  container_name="${container_name#/}"
+  while IFS=$'\t' read -r network gateway; do
+    is_valid_ipv4 "$gateway" || continue
+    printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$network" "$gateway"
+  done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\\t%s\\n" $name $network.Gateway}}{{end}}' "$container_reference" 2>/dev/null)
+}
+
+show_running_docker_containers() {
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+
+  printf '\n运行中的 Docker 容器（名称 | 镜像）：\n'
+  docker ps --format '{{.Names}} | {{.Image}}' 2>/dev/null
+}
+
+docker_network_mode_for_container() {
+  docker inspect --format '{{.HostConfig.NetworkMode}}' "$1" 2>/dev/null || true
+}
+
 find_npm_gateway_targets() {
-  local container_id image container_name network gateway
+  local container_id image container_name
 
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
 
   while IFS=$'\t' read -r container_id image container_name; do
     case "${image,,}" in
-      *nginx-proxy-manager*|jc21/*) ;;
+      *nginx*proxy*manager*|jc21/*) ;;
       *)
         case "${container_name,,}" in
           npm|npm-*|nginx-proxy-manager|nginx-proxy-manager-*) ;;
@@ -1129,10 +1154,7 @@ find_npm_gateway_targets() {
         esac
         ;;
     esac
-    while IFS=$'\t' read -r network gateway; do
-      is_valid_ipv4 "$gateway" || continue
-      printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$network" "$gateway"
-    done < <(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s\\t%s\\n" $name $network.Gateway}}{{end}}' "$container_id" 2>/dev/null)
+    docker_gateway_targets_for_container "$container_id"
   done < <(docker ps --format '{{.ID}}\t{{.Image}}\t{{.Names}}' 2>/dev/null)
 }
 
@@ -1437,6 +1459,7 @@ manage_kopia_listener() {
   local pid unit mode bind_host process_info parent_pid
   local -a npm_targets
   local npm_target npm_container_id npm_container_name npm_network npm_gateway
+  local manual_container npm_network_mode
 
   pid="$(printf '%s\n' "$listener" | listener_pid_from_details)"
   [[ "$pid" =~ ^[0-9]+$ ]] || { error "无法识别 Kopia 进程 PID。"; return 1; }
@@ -1484,8 +1507,20 @@ manage_kopia_listener() {
     2)
       mapfile -t npm_targets < <(find_npm_gateway_targets)
       if (( ${#npm_targets[@]} == 0 )); then
-        error "未发现带 IPv4 Docker 网络网关的 Nginx Proxy Manager 容器。请确认 NPM 正在运行且 Docker 可用。"
-        return 1
+        warn "未自动识别到带 IPv4 Docker 网络网关的 Nginx Proxy Manager 容器。"
+        show_running_docker_containers
+        read -r -p "输入 NPM 容器名称或 ID（直接回车返回）:" manual_container
+        [[ -n "$manual_container" ]] || return 0
+        mapfile -t npm_targets < <(docker_gateway_targets_for_container "$manual_container")
+        if (( ${#npm_targets[@]} == 0 )); then
+          npm_network_mode="$(docker_network_mode_for_container "$manual_container")"
+          if [[ "$npm_network_mode" == "host" ]]; then
+            warn "该容器使用 host 网络，NPM 可直接访问宿主机 127.0.0.1。请返回并选择“仅服务器本机”模式。"
+          else
+            error "容器 ${manual_container} 未找到 IPv4 Docker 网络网关。请确认名称正确且容器正在使用 bridge 网络。"
+          fi
+          return 1
+        fi
       fi
       if (( ${#npm_targets[@]} == 1 )); then
         npm_target="${npm_targets[0]}"
