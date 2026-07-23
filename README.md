@@ -1,66 +1,75 @@
-# Caddy 中文管理脚本
+# CaddyCtl
 
-该脚本用于在 Linux 宿主机上安装和管理 Caddy，并将请求反向代理到 Docker
-容器映射到宿主机的端口。
+`CaddyCtl` 是面向 Linux 宿主机的 Caddy 管理菜单。它安装、更新、配置和诊断
+Caddy，并可将 HTTPS 请求反向代理到 Docker 容器中的服务。
 
-## Kopia 端口映射
+## 命令边界
 
-当 Caddy 安装在宿主机、Kopia 运行在 Docker 中时，不需要让 Caddy 加入
-Docker 网络。建议只向宿主机回环地址发布 Kopia 端口：
-
-```yaml
-services:
-  kopia:
-    ports:
-      - "127.0.0.1:41515:51515"
-```
-
-其中 `41515` 是宿主机端口，`51515` 是示例中的 Kopia 容器内部端口，请以
-实际容器配置为准。随后在管理脚本中填写：
-
-- 域名：`kopiaalihk.6990699.xyz`
-- IP：`127.0.0.1`
-- 端口：`41515`
-- 协议：`http`
-
-菜单中的“添加或更新反向代理配置”提供两种模式：
-
-1. 手动输入上游 IP、端口和协议。
-2. Docker 容器连接向导，自动列出容器、检查内部端口的现有宿主机映射并生成配置。
-
-如果容器尚未发布端口，向导会输出需要加入 Compose 的回环地址映射。Docker
-不能给已经创建的容器原地增加端口映射，因此脚本不会自动重建或删除容器。
-
-## 使用
-
-将脚本上传到 Linux 服务器后执行：
+`CaddyCtl` 不替代官方 Caddy CLI：
 
 ```bash
-chmod +x caddy-manager.sh
-sudo ./caddy-manager.sh
-```
-
-选择“安装 Caddy / 安装管理命令”。安装完成后：
-
-```bash
-caddy
-```
-
-无参数调用会打开中文菜单；带参数调用仍然执行官方 Caddy CLI：
-
-```bash
-caddy version
+caddyctl                         # 打开管理菜单
+caddy version                    # 官方 Caddy CLI
 caddy validate --config /etc/caddy/Caddyfile
 ```
 
-脚本将站点配置保存在 `/etc/caddy/sites/*.caddy`，备份保存在
-`/var/backups/caddy-manager`。卸载 Caddy 时会保留配置和证书数据。
+## 安装
 
-当前脚本支持使用 systemd 的 Debian/Ubuntu 和 Fedora/RHEL（dnf）系统。
+将 `caddyctl.sh` 上传到服务器后执行：
 
-## 外部要求
+```bash
+chmod +x caddyctl.sh
+sudo ./caddyctl.sh
+```
 
-- DNS A/AAAA 记录必须指向服务器。
-- 服务器安全组及防火墙需要放行 TCP 80 和 443。
-- Cloudflare SSL/TLS 模式建议设置为 `Full (strict)`。
-- 不要再把 Kopia 的管理端口直接暴露给公网。
+在菜单中选择“安装 Caddy / 安装管理命令”。安装完成后，使用 `caddyctl` 打开
+菜单。脚本支持使用 systemd 的 Debian/Ubuntu 和 Fedora/RHEL（dnf）系统。
+
+## Docker 反向代理
+
+当 Caddy 安装在宿主机、应用运行在 Docker 中时，不需要将两者加入同一个
+Docker 网络。建议只将应用端口发布到宿主机回环地址：
+
+```yaml
+services:
+  app:
+    ports:
+      - "127.0.0.1:8080:8080"
+```
+
+随后运行：
+
+```text
+caddyctl
+  -> 5. 添加反向代理（手动 / Docker 向导）
+  -> 2. Docker 容器连接向导
+```
+
+向导会列出容器、读取现有端口映射、检查连接并创建站点配置。若容器尚未发布
+端口，它会输出应加入 Compose 的回环地址映射。Docker 不能给已创建的容器原地
+增加端口映射，因此脚本不会自动重建或删除容器。
+
+## 旧版迁移
+
+旧版脚本会把管理菜单安装为 `caddy`，这会遮蔽官方 CLI。运行新版
+`caddyctl.sh` 后选择“安装 Caddy / 安装管理命令”，脚本会：
+
+- 安装新的 `caddyctl` 管理入口；
+- 备份并移除可确认属于旧版的 `/usr/local/bin/caddy` 包装器；
+- 保留 `/etc/caddy`、证书数据和已有站点配置。
+
+如果 `caddy` 是其他手工创建的程序，脚本不会删除它。
+
+## 文件位置
+
+- 站点配置：`/etc/caddy/sites/*.caddy`
+- 配置和迁移备份：`/var/backups/caddyctl`
+- CaddyCtl 本体：`/usr/local/lib/caddyctl/caddyctl.sh`
+- 菜单入口：`/usr/local/bin/caddyctl`
+
+## 部署要求
+
+- DNS A/AAAA 记录指向服务器。
+- 服务器安全组及防火墙放行 TCP 80 和 443。
+- Cloudflare SSL/TLS 模式使用 `Full (strict)`。
+- 管理界面与内部服务端口仅发布到 `127.0.0.1`，不直接暴露公网。

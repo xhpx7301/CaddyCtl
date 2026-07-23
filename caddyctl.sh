@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 
-# Caddy Manager - a small interactive manager for a package-installed Caddy.
-# Run without arguments to open the menu. Arguments are forwarded to the real
-# Caddy binary after the manager command has been installed.
+# CaddyCtl - an interactive manager for a package-installed Caddy.
+# Run without arguments to open the menu. Keep the official `caddy` command
+# for the Caddy CLI; this project installs the separate `caddyctl` command.
 
 set -uo pipefail
 
-readonly MANAGER_VERSION="1.1.0"
+readonly PROJECT_NAME="CaddyCtl"
+readonly MANAGER_VERSION="2.0.0"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITES_DIR="/etc/caddy/sites"
-readonly BACKUP_DIR="/var/backups/caddy-manager"
-readonly MANAGER_DIR="/usr/local/lib/caddy-manager"
-readonly MANAGER_SCRIPT="${MANAGER_DIR}/caddy-manager.sh"
-readonly MANAGER_COMMAND="/usr/local/bin/caddy"
-readonly IMPORT_BEGIN="# BEGIN CADDY-MANAGER SITES"
-readonly IMPORT_END="# END CADDY-MANAGER SITES"
+readonly BACKUP_DIR="/var/backups/caddyctl"
+readonly MANAGER_DIR="/usr/local/lib/caddyctl"
+readonly MANAGER_SCRIPT="${MANAGER_DIR}/caddyctl.sh"
+readonly MANAGER_COMMAND="/usr/local/bin/caddyctl"
+readonly LEGACY_MANAGER_COMMAND="/usr/local/bin/caddy"
+readonly IMPORT_BEGIN="# BEGIN CADDYCTL SITES"
+readonly IMPORT_END="# END CADDYCTL SITES"
+readonly LEGACY_IMPORT_BEGIN="# BEGIN CADDY-MANAGER SITES"
 
 if [[ -t 1 ]]; then
   readonly RED=$'\033[31m'
@@ -43,17 +46,10 @@ manager_source() {
   readlink -f "$source_path" 2>/dev/null || printf '%s\n' "$source_path"
 }
 
-forward_to_caddy() {
-  if [[ $# -eq 0 ]]; then
-    return 1
-  fi
-
-  if [[ ! -x "$REAL_CADDY" ]]; then
-    error "尚未安装 Caddy，请先无参数运行 caddy-manager.sh 并选择安装。"
-    exit 127
-  fi
-
-  exec "$REAL_CADDY" "$@"
+show_command_usage() {
+  printf '%s\n' "$PROJECT_NAME 是 Caddy 的管理菜单。"
+  printf '%s\n' "用法：caddyctl"
+  printf '%s\n' "官方 Caddy CLI 保持不变，例如：caddy version"
 }
 
 require_root() {
@@ -92,6 +88,21 @@ backup_file() {
   cp -a -- "$path" "${BACKUP_DIR}/${label}.$(timestamp).bak"
 }
 
+is_legacy_manager_command() {
+  [[ -f "$LEGACY_MANAGER_COMMAND" ]] \
+    && grep -Fq 'MANAGER_SCRIPT="/usr/local/lib/caddy-manager/caddy-manager.sh"' "$LEGACY_MANAGER_COMMAND" 2>/dev/null
+}
+
+migrate_legacy_manager_command() {
+  if ! is_legacy_manager_command; then
+    return
+  fi
+
+  backup_file "$LEGACY_MANAGER_COMMAND" "legacy-caddy-command"
+  rm -f -- "$LEGACY_MANAGER_COMMAND"
+  success "已移除旧版 caddy 管理包装器，官方 caddy 命令已恢复。"
+}
+
 install_manager_command() {
   local source_path
   source_path="$(manager_source)"
@@ -104,36 +115,35 @@ install_manager_command() {
   fi
 
   if [[ -e "$MANAGER_COMMAND" ]] \
-      && ! grep -Fq 'MANAGER_SCRIPT="/usr/local/lib/caddy-manager/caddy-manager.sh"' "$MANAGER_COMMAND" 2>/dev/null; then
+      && ! grep -Fq '# CaddyCtl command wrapper' "$MANAGER_COMMAND" 2>/dev/null; then
     warn "$MANAGER_COMMAND 已存在，将先备份再安装管理入口。"
-    backup_file "$MANAGER_COMMAND" "caddy-command"
+    backup_file "$MANAGER_COMMAND" "caddyctl-command"
   fi
   rm -f -- "$MANAGER_COMMAND"
+  migrate_legacy_manager_command
 
   cat >"$MANAGER_COMMAND" <<'WRAPPER'
 #!/usr/bin/env bash
 set -uo pipefail
 
-readonly REAL_CADDY="/usr/bin/caddy"
-readonly MANAGER_SCRIPT="/usr/local/lib/caddy-manager/caddy-manager.sh"
+# CaddyCtl command wrapper
+readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
 
-if [[ $# -eq 0 ]]; then
-  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-    exec "$MANAGER_SCRIPT"
-  fi
-  if ! command -v sudo >/dev/null 2>&1; then
-    printf '打开管理菜单需要 root 权限，但系统未安装 sudo。\n' >&2
-    exit 1
-  fi
-  exec sudo "$MANAGER_SCRIPT"
+if [[ $# -ne 0 ]]; then
+  printf 'caddyctl 是管理菜单，请使用无参数的 caddyctl。官方 CLI 请使用 caddy。\n' >&2
+  exit 2
 fi
 
-if [[ ! -x "$REAL_CADDY" ]]; then
-  printf 'Caddy 尚未安装。请无参数运行 caddy 打开管理菜单。\n' >&2
-  exit 127
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  exec "$MANAGER_SCRIPT"
 fi
 
-exec "$REAL_CADDY" "$@"
+if ! command -v sudo >/dev/null 2>&1; then
+  printf '打开管理菜单需要 root 权限，但系统未安装 sudo。\n' >&2
+  exit 1
+fi
+
+exec sudo "$MANAGER_SCRIPT"
 WRAPPER
   chmod 0755 "$MANAGER_COMMAND"
 }
@@ -150,7 +160,8 @@ EOF
     return
   fi
 
-  if grep -Fq "$IMPORT_BEGIN" "$CADDYFILE"; then
+  if grep -Fq "$IMPORT_BEGIN" "$CADDYFILE" \
+      || grep -Fq "$LEGACY_IMPORT_BEGIN" "$CADDYFILE"; then
     return
   fi
 
@@ -241,8 +252,8 @@ install_caddy() {
 
   systemctl enable caddy >/dev/null 2>&1 || true
   if systemctl restart caddy; then
-    success "Caddy 已安装并启动。以后输入 caddy 即可打开此菜单。"
-    info "官方 CLI 仍可使用，例如：caddy version、caddy validate --config $CADDYFILE"
+    success "Caddy 已安装并启动。以后输入 caddyctl 即可打开管理菜单。"
+    info "官方 CLI 保持不变，例如：caddy version、caddy validate --config $CADDYFILE"
   else
     error "Caddy 已安装，但服务启动失败。请通过菜单查看日志。"
     return 1
@@ -315,7 +326,7 @@ uninstall_caddy() {
   fi
 
   success "Caddy 已卸载，配置、证书数据和管理菜单均已保留。"
-  info "需要重新安装时，输入 caddy 并选择“安装”。"
+  info "需要重新安装时，输入 caddyctl 并选择“安装”。"
 }
 
 is_valid_domain() {
@@ -393,7 +404,7 @@ save_proxy_config() {
   formatted_host="$(format_upstream_host "$upstream_host")"
 
   cat >"$temp_file" <<EOF
-# Managed by Caddy Manager. Local changes are preserved until this domain is edited again.
+# Managed by CaddyCtl. Local changes are preserved until this domain is edited again.
 $domain {
 	reverse_proxy $upstream_scheme://$formatted_host:$upstream_port
 }
@@ -432,7 +443,7 @@ configure_manual_proxy() {
   local domain upstream_host upstream_port upstream_scheme
 
   printf '\n%s手动添加或更新反向代理%s\n' "$BOLD" "$RESET"
-  read -r -p "1. 域名（例如 kopiaalihk.6990699.xyz）：" domain
+  read -r -p "1. 域名（例如 app.example.com）：" domain
   domain="${domain,,}"
   if ! is_valid_domain "$domain"; then
     error "域名格式不正确；如使用中文域名，请先转换为 Punycode。"
@@ -447,7 +458,7 @@ configure_manual_proxy() {
     return 1
   fi
 
-  read -r -p "3. 上游端口（例如 41515）：" upstream_port
+  read -r -p "3. 上游端口（例如 8080）：" upstream_port
   if ! is_valid_port "$upstream_port"; then
     error "端口必须是 1-65535 之间的整数。"
     return 1
@@ -467,15 +478,15 @@ show_compose_mapping_help() {
   local container_port="$1"
   local host_port="$2"
 
-  printf '\n请在 Kopia 的 compose.yaml 中加入：\n\n'
+  printf '\n请在应用的 compose.yaml 中加入：\n\n'
   printf 'services:\n'
-  printf '  kopia:\n'
+  printf '  app:\n'
   printf '    ports:\n'
   printf '      - "127.0.0.1:%s:%s"\n' "$host_port" "$container_port"
   printf '\n然后在 compose.yaml 所在目录执行：\n\n'
   printf '  docker compose up -d\n\n'
   warn "Docker 不能给已创建的容器原地增加端口映射，必须通过 Compose 重建容器。"
-  info "此操作通常不会删除挂载卷，但执行前应确认 Kopia 数据目录已经正确持久化。"
+  info "此操作通常不会删除挂载卷，但执行前应确认应用数据目录已经正确持久化。"
 }
 
 select_docker_binding() {
@@ -519,7 +530,7 @@ configure_docker_proxy() {
   printf '\n运行中的容器：\n'
   docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}'
   printf '\n'
-  read -r -p "1. 输入 Kopia 容器名称：" container_name
+  read -r -p "1. 输入容器名称：" container_name
   if ! docker inspect "$container_name" >/dev/null 2>&1; then
     error "未找到容器：$container_name"
     return 1
@@ -533,10 +544,10 @@ configure_docker_proxy() {
   if [[ -n "$exposed_ports" ]]; then
     printf '镜像声明的容器端口：\n%s\n' "$exposed_ports"
   else
-    warn "镜像没有声明 EXPOSE 端口，请根据 Kopia 启动参数填写实际监听端口。"
+    warn "镜像没有声明 EXPOSE 端口，请根据服务启动参数填写实际监听端口。"
   fi
 
-  read -r -p "2. Kopia 容器内部 TCP 端口（常见为 51515）：" container_port
+  read -r -p "2. 容器内部 TCP 端口（例如 8080）：" container_port
   if ! is_valid_port "$container_port"; then
     error "容器端口必须是 1-65535 之间的整数。"
     return 1
@@ -545,8 +556,8 @@ configure_docker_proxy() {
   published_display="$(docker port "$container_name" "${container_port}/tcp" 2>/dev/null || true)"
   if [[ -z "$published_display" ]]; then
     warn "该容器没有发布 ${container_port}/tcp 到宿主机。"
-    read -r -p "希望使用的宿主机端口 [默认 41515]：" host_port
-    host_port="${host_port:-41515}"
+    read -r -p "希望使用的宿主机端口 [默认 8080]：" host_port
+    host_port="${host_port:-8080}"
     if ! is_valid_port "$host_port"; then
       error "宿主机端口必须是 1-65535 之间的整数。"
       return 1
@@ -559,8 +570,8 @@ configure_docker_proxy() {
   binding="$(select_docker_binding "$container_name" "$container_port" || true)"
   if [[ -z "$binding" ]]; then
     error "只检测到 IPv6 或无法识别的映射。建议增加 127.0.0.1 的 IPv4 映射。"
-    read -r -p "希望使用的宿主机端口 [默认 41515]：" host_port
-    host_port="${host_port:-41515}"
+    read -r -p "希望使用的宿主机端口 [默认 8080]：" host_port
+    host_port="${host_port:-8080}"
     is_valid_port "$host_port" && show_compose_mapping_help "$container_port" "$host_port"
     return 1
   fi
@@ -568,18 +579,18 @@ configure_docker_proxy() {
   upstream_host="${binding%% *}"
   host_port="${binding##* }"
   if printf '%s\n' "$published_display" | grep -Eq '^0\.0\.0\.0:|^\[::\]:'; then
-    warn "当前端口发布到所有网络接口，Kopia 管理端口可能仍可被公网直接访问。"
+    warn "当前端口发布到所有网络接口，应用管理界面可能仍可被公网直接访问。"
     info "建议将 Compose 映射改成 127.0.0.1:${host_port}:${container_port}。"
   fi
 
-  read -r -p "3. 域名（例如 kopiaalihk.6990699.xyz）：" domain
+  read -r -p "3. 域名（例如 app.example.com）：" domain
   domain="${domain,,}"
   if ! is_valid_domain "$domain"; then
     error "域名格式不正确；如使用中文域名，请先转换为 Punycode。"
     return 1
   fi
 
-  read -r -p "4. Kopia 上游协议 [http/https，默认 http]：" upstream_scheme
+  read -r -p "4. 上游协议 [http/https，默认 http]：" upstream_scheme
   upstream_scheme="${upstream_scheme:-http}"
   if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
     error "上游协议只能是 http 或 https。"
@@ -589,7 +600,7 @@ configure_docker_proxy() {
   if command -v curl >/dev/null 2>&1; then
     if curl -ksS --connect-timeout 3 --max-time 5 -o /dev/null \
         "$upstream_scheme://$upstream_host:$host_port/"; then
-      success "宿主机可以访问 Kopia 映射端口。"
+      success "宿主机可以访问容器映射端口。"
     else
       warn "端口映射存在，但暂时无法取得 HTTP 响应；配置后可能出现 502。"
     fi
@@ -715,9 +726,9 @@ show_logs() {
 show_listeners() {
   printf '\n%s宿主机监听端口%s\n' "$BOLD" "$RESET"
   if command -v ss >/dev/null 2>&1; then
-    ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p;/:41515 /p'
+    ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -ltnp 2>/dev/null | sed -n '1,2p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p;/:41515 /p'
+    netstat -ltnp 2>/dev/null | sed -n '1,2p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
   else
     warn "未找到 ss 或 netstat。"
   fi
@@ -754,13 +765,13 @@ status_line() {
 
   printf '状态：%s%s%s | 服务：%s | 自启：%s | 站点：%s\n' \
     "$GREEN" "$installed" "$RESET" "$active" "$enabled" "$site_count"
-  printf '版本：%s | 管理脚本：%s\n' "$version" "$MANAGER_VERSION"
+  printf 'Caddy：%s | %s：%s\n' "$version" "$PROJECT_NAME" "$MANAGER_VERSION"
 }
 
 draw_menu() {
   clear 2>/dev/null || true
   printf '%s============================================%s\n' "$BLUE" "$RESET"
-  printf '%s          Caddy 中文管理菜单%s\n' "$BOLD" "$RESET"
+  printf '%s          CaddyCtl 中文管理菜单%s\n' "$BOLD" "$RESET"
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   status_line
   printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
@@ -810,6 +821,9 @@ main_menu() {
   done
 }
 
-forward_to_caddy "$@" || true
+if [[ $# -ne 0 ]]; then
+  show_command_usage
+  exit 2
+fi
 require_root
 main_menu
