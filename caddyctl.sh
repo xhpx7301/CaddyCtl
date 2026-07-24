@@ -48,7 +48,7 @@ confirm_action() {
   local prompt="$1"
   local answer
 
-  read -r -p "$prompt [y/N]：" answer || return 1
+  read -r -p "$prompt [y/N，回车默认 N]：" answer || return 1
   [[ "$answer" =~ ^[Yy]$ ]]
 }
 
@@ -952,7 +952,7 @@ show_config() {
     warn "暂未配置反向代理站点。"
   fi
 
-  read -r -p "是否查看原始 Caddy 配置？[y/N]：" answer
+  read -r -p "是否查看原始 Caddy 配置？[y/N，回车默认 N]：" answer
   [[ "$answer" =~ ^[Yy]$ ]] && show_raw_config
 }
 
@@ -2036,7 +2036,7 @@ manage_generic_systemd_listener() {
         if (( ${#config_candidates[@]} > 0 )); then
           IFS=$'\t' read -r config_path old_address <<< "$selected_candidate"
           info "已识别配置：${config_path}；当前监听：${old_address}。"
-          read -r -p "自动备份、替换为 ${GENERIC_BIND_HOST}:${port} 并重启 ${unit}？[y/N]：" automatic_answer
+          read -r -p "自动备份、替换为 ${GENERIC_BIND_HOST}:${port} 并重启 ${unit}？[y/N，回车默认 N]：" automatic_answer
           automatic_answer="${automatic_answer:-N}"
           case "$automatic_answer" in
             Y|y)
@@ -2058,7 +2058,7 @@ manage_generic_systemd_listener() {
       else
         info "端口存储在数据库或面板内部的服务无法由通用文本替换安全修改。"
       fi
-      read -r -p "是否手动指定应用文本配置文件？[y/N]：" manual_config_answer
+      read -r -p "是否手动指定应用文本配置文件？[y/N，回车默认 N]：" manual_config_answer
       manual_config_answer="${manual_config_answer:-N}"
       case "$manual_config_answer" in
         Y|y) ;;
@@ -2342,7 +2342,7 @@ show_npm_shared_network_guide() {
   if docker network inspect "$shared_network" >/dev/null 2>&1; then
     info "Docker 网络 ${shared_network} 已存在。"
   else
-    read -r -p "立即创建 Docker 共享网络 ${shared_network}？[y/N]：" create_network_answer
+    read -r -p "立即创建 Docker 共享网络 ${shared_network}？[y/N，回车默认 N]：" create_network_answer
     create_network_answer="${create_network_answer:-N}"
     case "$create_network_answer" in
       Y|y)
@@ -2365,7 +2365,7 @@ show_npm_shared_network_guide() {
   if ! docker network inspect "$shared_network" >/dev/null 2>&1; then
     warn "Docker 网络 ${shared_network} 尚未创建，未执行容器连接。"
   else
-    read -r -p "立即将 NPM ${npm_container_name} 和应用 ${app_container_name} 加入 ${shared_network}？[y/N]：" connect_network_answer
+    read -r -p "立即将 NPM ${npm_container_name} 和应用 ${app_container_name} 加入 ${shared_network}？[y/N，回车默认 N]：" connect_network_answer
     connect_network_answer="${connect_network_answer:-N}"
     case "$connect_network_answer" in
       Y|y)
@@ -2467,7 +2467,7 @@ show_docker_mapping_plan() {
     if [[ "$current_host_ip" == "$bind_host" ]]; then
       info "当前 Docker 端口映射已是目标地址，无需修改。"
     elif [[ -n "$service" && "$service" != "<no value>" && -n "$workdir" && -d "$workdir" && -n "$config_files" && "$config_files" != *,* && -f "$config_files" ]]; then
-      read -r -p "自动备份、修改 Compose 并重建服务 ${service}？[y/N]：" auto_apply_answer
+      read -r -p "自动备份、修改 Compose 并重建服务 ${service}？[y/N，回车默认 N]：" auto_apply_answer
       auto_apply_answer="${auto_apply_answer:-N}"
       case "$auto_apply_answer" in
         Y|y)
@@ -2745,7 +2745,7 @@ show_status_detail() {
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] && printf '主进程 PID：%s\n' "$pid"
   [[ -n "$started" && "$started" != "n/a" ]] && printf '本次启动时间：%s\n' "$started"
 
-  read -r -p "是否查看原始 systemd 服务详情？[y/N]：" answer
+  read -r -p "是否查看原始 systemd 服务详情？[y/N，回车默认 N]：" answer
   [[ "$answer" =~ ^[Yy]$ ]] || return 0
   printf '\n%s原始 systemd 服务详情%s\n' "$BOLD" "$RESET"
   systemctl status caddy --no-pager -l 2>/dev/null || true
