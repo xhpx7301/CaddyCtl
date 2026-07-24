@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.32"
+readonly MANAGER_VERSION="3.3.33"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1043,7 +1043,7 @@ diagnose_configured_upstreams() {
 diagnose_upstream() {
   local mode upstream_scheme upstream_host upstream_port
 
-  printf '\n%s检测后端服务监听与连通性%s\n' "$BOLD" "$RESET"
+  printf '\n%s检测 Caddy 后端服务监听与连通性%s\n' "$BOLD" "$RESET"
   info "后端服务是 Caddy 转发请求的实际应用，例如 Kopia 的 127.0.0.1:41515。"
   printf '  1. 自动检测全部已配置的反向代理\n'
   printf '  2. 手动检测未配置的服务地址\n'
@@ -2596,7 +2596,7 @@ draw_menu() {
   printf '  9. 校验并重载 Caddy\n'
   printf ' 10. 查看 Caddy 服务日志\n'
   printf ' 11. 查看 Caddy 端口监听与 Docker 映射\n'
-  printf ' 12. 检测后端服务监听与连通性\n'
+  printf ' 12. 检测 Caddy 后端服务监听与连通性\n'
   printf ' 13. 本机服务端口监听助手\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
