@@ -2676,19 +2676,41 @@ service_value() {
 
 status_line() {
   local installed="未安装" version="-" active="未运行" enabled="未启用" site_count="0"
+  local installed_color="$YELLOW" active_color="$YELLOW" enabled_color="$YELLOW"
+  local service_active service_enabled
 
   if [[ -x "$REAL_CADDY" ]]; then
     installed="已安装"
+    installed_color="$GREEN"
     version="$($REAL_CADDY version 2>/dev/null || printf '未知')"
   fi
-  [[ "$(service_value is-active)" == "active" ]] && active="运行中"
-  [[ "$(service_value is-enabled)" == "enabled" ]] && enabled="开机启动"
+
+  service_active="$(service_value is-active)"
+  case "$service_active" in
+    active) active="运行中"; active_color="$GREEN" ;;
+    failed) active="启动失败"; active_color="$RED" ;;
+    activating|deactivating) active="状态转换中" ;;
+    inactive) active="未运行" ;;
+    *) active="${service_active:-不可用}" ;;
+  esac
+
+  service_enabled="$(service_value is-enabled)"
+  case "$service_enabled" in
+    enabled) enabled="已启用"; enabled_color="$GREEN" ;;
+    disabled) enabled="未启用" ;;
+    masked) enabled="已屏蔽"; enabled_color="$RED" ;;
+    *) enabled="${service_enabled:-不可用}" ;;
+  esac
+
   if [[ -d "$SITES_DIR" ]]; then
     site_count="$(find "$SITES_DIR" -maxdepth 1 -type f -name '*.caddy' 2>/dev/null | wc -l | tr -d ' ')"
   fi
 
-  printf '安装：%s%s%s | 服务：%s | 开机启动：%s | 站点数：%s\n' \
-    "$GREEN" "$installed" "$RESET" "$active" "$enabled" "$site_count"
+  printf '安装：%s%s%s | 服务：%s%s%s | 开机启动：%s%s%s | 站点数：%s\n' \
+    "$installed_color" "$installed" "$RESET" \
+    "$active_color" "$active" "$RESET" \
+    "$enabled_color" "$enabled" "$RESET" \
+    "$site_count"
   printf 'Caddy 版本：%s | CaddyCtl 版本：%s\n' "$version" "$MANAGER_VERSION"
 }
 
