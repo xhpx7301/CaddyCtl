@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.18"
+readonly MANAGER_VERSION="3.3.19"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2016,7 +2016,7 @@ show_docker_mapping_plan() {
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
   printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
-  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
+  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s（需发布 127.0.0.1；NPM 容器不可用）\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
@@ -2031,7 +2031,10 @@ show_docker_mapping_plan() {
       warn "兼容方案会将端口发布到所有 IPv4 网卡。请限制防火墙来源，仅让 NPM 所在 Docker 网段访问。"
       info "重建容器后，在 NPM 中填写 Docker 网关地址:${host_port}；共享网络方案更安全且无需发布端口。"
       ;;
-    3) bind_host="127.0.0.1" ;;
+    3)
+      bind_host="127.0.0.1"
+      info "此模式仅供宿主机上的 Caddy、Nginx 等反代；Docker 内的 NPM 无法访问 127.0.0.1:${host_port}。"
+      ;;
     4)
       bind_host="0.0.0.0"
       warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
