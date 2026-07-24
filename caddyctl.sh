@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.25"
+readonly MANAGER_VERSION="3.3.26"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1088,7 +1088,7 @@ localize_ss_listener_header() {
     s/Recv-Q/接收队列/
     s/Send-Q/发送队列/
     s/Local Address:Port/本地监听地址:端口/
-    s/Peer Address:Port/对端地址:端口/
+    s/Peer Address:Port/远端限制/
     s/Process/进程/
   }'
 }
@@ -1096,6 +1096,7 @@ localize_ss_listener_header() {
 show_all_local_listeners() {
   printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
+  info "远端限制在 LISTEN 状态通常显示 0.0.0.0:* 或 [::]:*，表示可接受的连接范围，不是 Docker 容器地址。"
   info "docker-proxy 表示宿主机发布端口；容器内部监听位于独立网络空间，需在 Docker 映射详情中查看端口。"
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | localize_ss_listener_header
