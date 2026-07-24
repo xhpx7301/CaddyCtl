@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.34"
+readonly MANAGER_VERSION="3.3.35"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1750,8 +1750,8 @@ prompt_generic_systemd_bind_host() {
   GENERIC_NPM_GATEWAY=""
   printf '  1. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s（Docker NPM 不可访问）\n' "$port"
   printf '  2. [Docker NPM] 经 Docker 网关访问（自动识别并验证）\n'
-  printf '  3. [公网] 所有 IPv4 可访问：0.0.0.0:%s（需配置防火墙）\n' "$port"
-  printf '  4. [指定网卡] 仅指定服务器 IPv4 地址可访问\n'
+  printf '  3. [指定网卡] 仅指定服务器 IPv4 地址可访问（适用于内网或特定公网 IP）\n'
+  printf '  4. [公网] 所有 IPv4 可访问：0.0.0.0:%s（需配置防火墙）\n' "$port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
 
@@ -1802,16 +1802,16 @@ prompt_generic_systemd_bind_host() {
       info "检测到 NPM 容器 ${npm_container_name}，网络 ${npm_network}，网关 ${npm_gateway}。"
       ;;
     3)
-      GENERIC_BIND_HOST="0.0.0.0"
-      warn "此端口将接受所有 IPv4 网络接口的连接，请仅在防火墙允许可信来源。"
-      ;;
-    4)
       read -r -p "服务器本机 IPv4 地址：" manual_host
       if ! is_valid_ipv4 "$manual_host" || ! is_local_upstream_host "$manual_host"; then
         error "该地址不是服务器当前网卡上的 IPv4 地址。"
         return 1
       fi
       GENERIC_BIND_HOST="$manual_host"
+      ;;
+    4)
+      GENERIC_BIND_HOST="0.0.0.0"
+      warn "此端口将接受所有 IPv4 网络接口的连接，请仅在防火墙允许可信来源。"
       ;;
     0) return 1 ;;
     *) error "无效选项：$mode"; return 1 ;;
