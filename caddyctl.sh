@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.15"
+readonly MANAGER_VERSION="3.3.16"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1953,8 +1953,9 @@ show_npm_shared_network_guide() {
   fi
 
   warn "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 没有共享 Docker 网络。"
-  default_network="${npm_service:-$npm_container_name}-${app_service:-$app_container_name}"
-  read -r -p "共享网络名称 [默认 ${default_network}]：" shared_network
+  # Network names are for operators to recognize; Compose service names remain for NPM DNS upstreams.
+  default_network="${npm_container_name}-${app_container_name}"
+  read -r -p "共享网络名称 [默认 ${default_network}，按容器名自动生成]：" shared_network
   shared_network="${shared_network:-$default_network}"
   if [[ ! "$shared_network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
     error "Docker 网络名称格式不正确。"
