@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.20"
+readonly MANAGER_VERSION="3.3.21"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2088,7 +2088,7 @@ show_docker_mapping_plan() {
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
   printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
-  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s（需发布 127.0.0.1；NPM 容器不可用）\n' "$host_port" "$internal_port"
+  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s（Docker 启动需发布为 127.0.0.1；不使用 NPM 容器时选择）\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
