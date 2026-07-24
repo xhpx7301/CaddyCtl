@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.35"
+readonly MANAGER_VERSION="3.3.36"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1749,7 +1749,7 @@ prompt_generic_systemd_bind_host() {
   GENERIC_NPM_CONTAINER_NAME=""
   GENERIC_NPM_GATEWAY=""
   printf '  1. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s（Docker NPM 不可访问）\n' "$port"
-  printf '  2. [Docker NPM] 经 Docker 网关访问（自动识别并验证）\n'
+  printf '  2. [Docker NPM] 经 Docker 网关访问（自动识别；需应用支持绑定该地址）\n'
   printf '  3. [指定网卡] 仅指定服务器 IPv4 地址可访问（适用于内网或特定公网 IP）\n'
   printf '  4. [公网] 所有 IPv4 可访问：0.0.0.0:%s（需配置防火墙）\n' "$port"
   printf '  0. 返回\n'
@@ -1800,6 +1800,7 @@ prompt_generic_systemd_bind_host() {
       GENERIC_NPM_CONTAINER_NAME="$npm_container_name"
       GENERIC_NPM_GATEWAY="$npm_gateway"
       info "检测到 NPM 容器 ${npm_container_name}，网络 ${npm_network}，网关 ${npm_gateway}。"
+      info "将请求应用监听 ${npm_gateway}:${port}；这不是将 systemd 服务挂载到 NPM 容器。"
       ;;
     3)
       read -r -p "服务器本机 IPv4 地址：" manual_host
@@ -1988,7 +1989,7 @@ manage_generic_systemd_listener() {
   local port="$1"
   local listener="$2"
   local unit="$3"
-  local mode config_path old_address selection automatic_answer selected_candidate
+  local mode config_path old_address selection automatic_answer manual_config_answer selected_candidate
   local -a config_candidates
 
   while true; do
@@ -2048,7 +2049,18 @@ manage_generic_systemd_listener() {
         fi
       fi
       warn "未自动识别到唯一的文本配置监听地址，需手动指定。"
-      info "端口存储在数据库或面板内部的服务不会被直接修改。"
+      if [[ -n "$GENERIC_NPM_GATEWAY" ]]; then
+        info "选项 2 的目标监听地址为 ${GENERIC_NPM_GATEWAY}:${port}；端口存储在数据库或面板内部的服务无法由通用文本替换安全修改。"
+      else
+        info "端口存储在数据库或面板内部的服务无法由通用文本替换安全修改。"
+      fi
+      read -r -p "是否手动指定应用文本配置文件？[y/N]：" manual_config_answer
+      manual_config_answer="${manual_config_answer:-N}"
+      case "$manual_config_answer" in
+        Y|y) ;;
+        N|n) info "已取消手动配置。"; continue ;;
+        *) error "请输入 y 或 n。"; continue ;;
+      esac
       printf '旧地址必须与文件内容完全一致，例如 0.0.0.0:%s 或 127.0.0.1:%s。\n' "$port" "$port"
       read -r -p "应用配置文件绝对路径：" config_path
       read -r -p "配置中的旧监听地址：" old_address
