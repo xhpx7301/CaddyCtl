@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.16"
+readonly MANAGER_VERSION="3.3.17"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1894,7 +1894,7 @@ show_npm_shared_network_guide() {
   local app_container_name="$2"
   local container_port="$3"
   local npm_target npm_container_id npm_container_name npm_image manual_container selection
-  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name default_network
+  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name default_network create_network_answer
   local -a npm_containers app_networks npm_networks
 
   printf '\n%sDocker 后端 + NPM 共享网络指引%s\n' "$BOLD" "$RESET"
@@ -1964,7 +1964,24 @@ show_npm_shared_network_guide() {
   if docker network inspect "$shared_network" >/dev/null 2>&1; then
     info "Docker 网络 ${shared_network} 已存在。"
   else
-    printf '\n先执行一次：\n\n  docker network create %s\n' "$shared_network"
+    read -r -p "立即创建 Docker 共享网络 ${shared_network}？[Y/n]：" create_network_answer
+    create_network_answer="${create_network_answer:-Y}"
+    case "$create_network_answer" in
+      Y|y)
+        if ! docker network create "$shared_network" >/dev/null; then
+          error "创建 Docker 网络失败：${shared_network}"
+          return 1
+        fi
+        success "已创建 Docker 共享网络：${shared_network}。"
+        ;;
+      N|n)
+        info "未创建 Docker 网络。可稍后执行：docker network create ${shared_network}"
+        ;;
+      *)
+        error "请输入 Y 或 n。"
+        return 1
+        ;;
+    esac
   fi
   printf '\n在 NPM 和应用各自的 Compose 文件中加入同名外部网络：\n\n'
   printf 'services:\n  %s:\n    networks:\n      - %s\n\n' "${npm_service:-<NPM服务名>}" "$shared_network"
