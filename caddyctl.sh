@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.21"
+readonly MANAGER_VERSION="3.3.22"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1915,6 +1915,118 @@ connect_container_to_network() {
   success "已将容器 ${container_name} 加入网络 ${network_name}。"
 }
 
+replace_compose_port_mapping() {
+  local config_path="$1"
+  local current_host_ip="$2"
+  local host_port="$3"
+  local internal_port="$4"
+  local bind_host="$5"
+  local temp_file line mapping_regex port_suffix line_suffix match_count=0
+
+  [[ -r "$config_path" && -w "$config_path" ]] || {
+    error "Compose 配置文件不可读或不可写：${config_path}"
+    return 1
+  }
+  temp_file="$(mktemp "${config_path}.caddyctl.XXXXXX")" || return 1
+  if [[ "$current_host_ip" == "0.0.0.0" ]]; then
+    mapping_regex="^([[:space:]]*-[[:space:]]*[\"']?)(0\\.0\\.0\\.0:)?${host_port}:${internal_port}(/tcp)?([\"']?[[:space:]]*(#.*)?)$"
+  else
+    mapping_regex="^([[:space:]]*-[[:space:]]*[\"']?)${current_host_ip}:${host_port}:${internal_port}(/tcp)?([\"']?[[:space:]]*(#.*)?)$"
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ $mapping_regex ]]; then
+      ((match_count += 1))
+      if [[ "$current_host_ip" == "0.0.0.0" ]]; then
+        port_suffix="${BASH_REMATCH[3]:-}"
+        line_suffix="${BASH_REMATCH[4]:-}"
+      else
+        port_suffix="${BASH_REMATCH[2]:-}"
+        line_suffix="${BASH_REMATCH[3]:-}"
+      fi
+      printf '%s%s:%s:%s%s%s\n' "${BASH_REMATCH[1]}" "$bind_host" "$host_port" "$internal_port" "$port_suffix" "$line_suffix" >>"$temp_file"
+    else
+      printf '%s\n' "$line" >>"$temp_file"
+    fi
+  done <"$config_path"
+
+  if (( match_count != 1 )); then
+    rm -f -- "$temp_file"
+    warn "未能在 Compose 文件中唯一识别当前端口映射，未自动修改。"
+    return 1
+  fi
+  chmod --reference="$config_path" "$temp_file" || {
+    rm -f -- "$temp_file"
+    return 1
+  }
+  mv -- "$temp_file" "$config_path"
+}
+
+wait_for_docker_port_mapping() {
+  local host_port="$1"
+  local expected_host="$2"
+  local expected_container_port="$3"
+  local mapping container_id container_name container_port mapped_host attempt
+
+  for ((attempt = 1; attempt <= 10; attempt++)); do
+    mapping="$(docker_mapping_for_host_port "$host_port" || true)"
+    if [[ -n "$mapping" ]]; then
+      IFS=$'\t' read -r container_id container_name container_port mapped_host <<< "$mapping"
+      if [[ "$mapped_host" == "$expected_host" && "$container_port" == "$expected_container_port" ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+apply_compose_port_mapping() {
+  local config_path="$1"
+  local workdir="$2"
+  local service="$3"
+  local current_host_ip="$4"
+  local host_port="$5"
+  local internal_port="$6"
+  local bind_host="$7"
+  local rollback_file
+
+  rollback_file="$(mktemp "$(dirname "$config_path")/.caddyctl-port-rollback.XXXXXX")" || return 1
+  cp -a -- "$config_path" "$rollback_file" || {
+    rm -f -- "$rollback_file"
+    return 1
+  }
+  backup_file "$config_path" "docker-${service}-port-mapping-before-change"
+
+  if ! replace_compose_port_mapping "$config_path" "$current_host_ip" "$host_port" "$internal_port" "$bind_host"; then
+    rm -f -- "$rollback_file"
+    return 1
+  fi
+  if ! (cd "$workdir" && docker compose -f "$config_path" config -q); then
+    error "Compose 配置校验失败，正在恢复原配置。"
+    cp -a -- "$rollback_file" "$config_path"
+    rm -f -- "$rollback_file"
+    return 1
+  fi
+  if ! (cd "$workdir" && docker compose -f "$config_path" up -d "$service"); then
+    error "重建 Docker 服务失败，正在恢复原配置和服务。"
+    cp -a -- "$rollback_file" "$config_path"
+    (cd "$workdir" && docker compose -f "$config_path" up -d "$service") || true
+    rm -f -- "$rollback_file"
+    return 1
+  fi
+  if ! wait_for_docker_port_mapping "$host_port" "$bind_host" "${internal_port}/tcp"; then
+    error "未检测到目标端口映射，正在恢复原配置和服务。"
+    cp -a -- "$rollback_file" "$config_path"
+    (cd "$workdir" && docker compose -f "$config_path" up -d "$service") || true
+    rm -f -- "$rollback_file"
+    return 1
+  fi
+
+  rm -f -- "$rollback_file"
+  success "已修改 Compose 端口映射并重建服务：${bind_host}:${host_port}:${internal_port}。"
+}
+
 docker_compose_service_or_name() {
   local container_reference="$1"
   local service container_name
@@ -2070,7 +2182,7 @@ show_docker_mapping_plan() {
   local container_port="$3"
   local current_host_ip="$4"
   local host_port="$5"
-  local mode bind_host internal_port project service workdir config_files
+  local mode bind_host internal_port project service workdir config_files auto_apply_answer
 
   internal_port="${container_port%/tcp}"
   project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container_id" 2>/dev/null || true)"
@@ -2123,11 +2235,28 @@ show_docker_mapping_plan() {
     info "检测到 Compose 项目：$project"
     [[ -n "$workdir" ]] && info "项目目录：$workdir"
     [[ -n "$config_files" ]] && info "配置文件：$config_files"
-    info "保存 Compose 修改后，在项目目录执行 docker compose up -d 以重建容器。"
+    if [[ "$current_host_ip" == "$bind_host" ]]; then
+      info "当前 Docker 端口映射已是目标地址，无需修改。"
+    elif [[ -n "$service" && "$service" != "<no value>" && -n "$workdir" && -d "$workdir" && -n "$config_files" && "$config_files" != *,* && -f "$config_files" ]]; then
+      read -r -p "自动备份、修改 Compose 并重建服务 ${service}？[y/N]：" auto_apply_answer
+      auto_apply_answer="${auto_apply_answer:-N}"
+      case "$auto_apply_answer" in
+        Y|y)
+          apply_compose_port_mapping "$config_files" "$workdir" "$service" "$current_host_ip" "$host_port" "$internal_port" "$bind_host" || return 1
+          ;;
+        N|n)
+          info "未自动修改。保存上述 Compose 片段后，在项目目录执行 docker compose up -d。"
+          ;;
+        *) error "请输入 Y 或 n。"; return 1 ;;
+      esac
+    else
+      warn "未能安全识别单个可修改的 Compose 文件，未自动重建容器。"
+      info "保存上述 Compose 片段后，在项目目录执行 docker compose up -d。"
+    fi
   else
     warn "未检测到 Compose 标签。Docker 无法原地修改端口映射，需要使用新的 -p 参数重建该容器。"
   fi
-  warn "为避免丢失容器环境变量、卷和网络，此菜单不会自动重建 Docker 容器。"
+  info "自动重建仅在已识别的单文件 Compose 与唯一端口映射时执行；其他情形保留手工操作。"
 }
 
 show_native_listener_launch_info() {
