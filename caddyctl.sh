@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.22"
+readonly MANAGER_VERSION="3.3.23"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2200,7 +2200,7 @@ show_docker_mapping_plan() {
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
   printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
-  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s（Docker 启动需发布为 127.0.0.1；不使用 NPM 容器时选择）\n' "$host_port" "$internal_port"
+  printf '  3. [宿主机 Caddy] 仅本机端口：127.0.0.1:%s:%s（需发布 127.0.0.1；可与选项 1 共用）\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
@@ -2217,7 +2217,8 @@ show_docker_mapping_plan() {
       ;;
     3)
       bind_host="127.0.0.1"
-      info "此模式仅供宿主机上的 Caddy、Nginx 等反代；Docker 内的 NPM 无法访问 127.0.0.1:${host_port}。"
+      info "此端口供宿主机上的 Caddy、Nginx 等反代；Docker 内的 NPM 不能经 127.0.0.1:${host_port} 访问。"
+      info "若已选择选项 1 共享网络，NPM 仍可使用 ${service:-应用服务名}:${internal_port} 直连应用。"
       ;;
     4)
       bind_host="0.0.0.0"
