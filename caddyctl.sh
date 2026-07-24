@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.30"
+readonly MANAGER_VERSION="3.3.31"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1234,19 +1234,19 @@ show_all_docker_internal_listeners() {
     [[ -n "$container_id" && -n "$container_name" ]] || continue
     ((count += 1))
 
-    network_ips="$(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}={{$network.IPAddress}}{{println}}{{end}}' "$container_id" 2>/dev/null | paste -sd ',' -)"
+    network_ips="$(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}={{$network.IPAddress}}{{println}}{{end}}' "$container_id" 2>/dev/null | awk 'NF' | paste -sd ',' -)"
     [[ -n "$network_ips" ]] || network_ips="-"
 
     listeners=""
     detection=""
     if docker exec "$container_id" ss -ltnH >/dev/null 2>&1; then
-      listeners="$(docker exec "$container_id" ss -ltnH 2>/dev/null | awk '{print $4}' | paste -sd ',' -)"
+      listeners="$(docker exec "$container_id" ss -ltnH 2>/dev/null | awk '$4 !~ /^127\.0\.0\.11:/ {print $4}' | paste -sd ',' -)"
       detection="ss 实际检测"
     elif docker exec "$container_id" netstat -ltn >/dev/null 2>&1; then
-      listeners="$(docker exec "$container_id" netstat -ltn 2>/dev/null | awk '$1 ~ /^tcp/ {print $4}' | paste -sd ',' -)"
+      listeners="$(docker exec "$container_id" netstat -ltn 2>/dev/null | awk '$1 ~ /^tcp/ && $4 !~ /^127\.0\.0\.11:/ {print $4}' | paste -sd ',' -)"
       detection="netstat 实际检测"
     else
-      exposed_ports="$(docker inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{println $port}}{{end}}' "$container_id" 2>/dev/null | paste -sd ',' -)"
+      exposed_ports="$(docker inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{println $port}}{{end}}' "$container_id" 2>/dev/null | awk 'NF' | paste -sd ',' -)"
       if [[ -n "$exposed_ports" ]]; then
         listeners="声明：${exposed_ports}"
         detection="无检测工具；仅镜像声明"
