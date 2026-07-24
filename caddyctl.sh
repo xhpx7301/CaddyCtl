@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.19"
+readonly MANAGER_VERSION="3.3.20"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1876,6 +1876,45 @@ docker_container_network_names() {
   docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$1" 2>/dev/null
 }
 
+docker_container_has_network() {
+  local container_reference="$1"
+  local network_name="$2"
+  local attached_network
+
+  while IFS= read -r attached_network; do
+    [[ "$attached_network" == "$network_name" ]] && return 0
+  done < <(docker_container_network_names "$container_reference")
+  return 1
+}
+
+connect_container_to_network() {
+  local container_reference="$1"
+  local container_name="$2"
+  local network_name="$3"
+  local network_alias="${4:-}"
+
+  if docker_container_has_network "$container_reference" "$network_name"; then
+    info "容器 ${container_name} 已加入网络 ${network_name}。"
+    return 0
+  fi
+
+  if [[ -n "$network_alias" ]]; then
+    if ! docker network connect --alias "$network_alias" "$network_name" "$container_reference"; then
+      error "无法将容器 ${container_name} 加入网络 ${network_name}。"
+      return 1
+    fi
+  elif ! docker network connect "$network_name" "$container_reference"; then
+    error "无法将容器 ${container_name} 加入网络 ${network_name}。"
+    return 1
+  fi
+
+  if ! docker_container_has_network "$container_reference" "$network_name"; then
+    error "容器 ${container_name} 未出现在网络 ${network_name} 中。"
+    return 1
+  fi
+  success "已将容器 ${container_name} 加入网络 ${network_name}。"
+}
+
 docker_compose_service_or_name() {
   local container_reference="$1"
   local service container_name
@@ -1894,10 +1933,10 @@ show_npm_shared_network_guide() {
   local app_container_name="$2"
   local container_port="$3"
   local npm_target npm_container_id npm_container_name npm_image manual_container selection
-  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name default_network create_network_answer
+  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name default_network create_network_answer connect_network_answer
   local -a npm_containers app_networks npm_networks
 
-  printf '\n%sDocker 后端 + NPM 共享网络指引%s\n' "$BOLD" "$RESET"
+  printf '\n%sDocker 后端 + NPM 共享网络创建%s\n' "$BOLD" "$RESET"
   mapfile -t npm_containers < <(find_npm_containers)
   if (( ${#npm_containers[@]} == 0 )); then
     warn "未自动识别 Nginx Proxy Manager 容器。"
@@ -1948,7 +1987,7 @@ show_npm_shared_network_guide() {
   if [[ -n "$shared_network" ]]; then
     success "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 已共享网络：${shared_network}。"
     info "请在 NPM 中将上游设为 ${upstream_name}:${internal_port}，协议按应用实际情况选择。"
-    warn "请确认该网络已在两个 Compose 文件中声明；手工 docker network connect 的连接会在容器重建后丢失。"
+    warn "请确认该网络已在两个 Compose 文件中声明；手工连接会在容器重建后丢失。"
     return 0
   fi
 
@@ -1983,13 +2022,46 @@ show_npm_shared_network_guide() {
         ;;
     esac
   fi
+
+  if ! docker network inspect "$shared_network" >/dev/null 2>&1; then
+    warn "Docker 网络 ${shared_network} 尚未创建，未执行容器连接。"
+  else
+    read -r -p "立即将 NPM ${npm_container_name} 和应用 ${app_container_name} 加入 ${shared_network}？[y/N]：" connect_network_answer
+    connect_network_answer="${connect_network_answer:-N}"
+    case "$connect_network_answer" in
+      Y|y)
+        connect_container_to_network "$app_container_id" "$app_container_name" "$shared_network" "$upstream_name" || return 1
+        connect_container_to_network "$npm_container_id" "$npm_container_name" "$shared_network" || return 1
+        if docker_container_has_network "$app_container_id" "$shared_network" && docker_container_has_network "$npm_container_id" "$shared_network"; then
+          success "已验证 NPM 与应用容器均已加入网络 ${shared_network}。"
+        else
+          error "共享网络成员验证失败。"
+          return 1
+        fi
+        if docker exec "$npm_container_id" getent hosts "$upstream_name" >/dev/null 2>&1; then
+          success "NPM 容器可解析上游名称：${upstream_name}。"
+        else
+          warn "未能在 NPM 容器中执行 getent 解析检查；请在 NPM 保存代理主机后验证连接。"
+        fi
+        success "现在可在 NPM 中将上游设为 ${upstream_name}:${internal_port}。"
+        ;;
+      N|n)
+        info "未连接当前容器。完成 Compose 配置后执行 docker compose up -d，或重新进入此菜单连接。"
+        ;;
+      *)
+        error "请输入 Y 或 n。"
+        return 1
+        ;;
+    esac
+  fi
+
   printf '\n在 NPM 和应用各自的 Compose 文件中加入同名外部网络：\n\n'
   printf 'services:\n  %s:\n    networks:\n      - %s\n\n' "${npm_service:-<NPM服务名>}" "$shared_network"
   printf 'services:\n  %s:\n    networks:\n      - %s\n\n' "${app_service:-<应用服务名>}" "$shared_network"
   printf 'networks:\n  %s:\n    external: true\n\n' "$shared_network"
-  info "分别在两个 Compose 项目目录执行 docker compose up -d。"
-  info "完成后，NPM 上游填写 ${upstream_name}:${internal_port}，无需发布该应用端口到宿主机。"
-  warn "确认 NPM 访问正常后，才移除应用现有 ports 映射；菜单不会自动重建容器。"
+  info "以上片段用于持久化：分别保存后在两个 Compose 项目目录执行 docker compose up -d。"
+  info "手工连接成功时可立即使用 ${upstream_name}:${internal_port}；重建容器后必须依靠上述 Compose 配置恢复连接。"
+  warn "确认 NPM 访问正常后，才移除应用现有 ports 映射；菜单不会自动修改 Compose 或重建容器。"
 }
 
 show_docker_mapping_plan() {
