@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.28"
+readonly MANAGER_VERSION="3.3.29"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1216,8 +1216,8 @@ show_docker_container_internal_listeners() {
   fi
 }
 
-inspect_docker_internal_listeners() {
-  local container_reference container_name
+show_all_docker_internal_listeners() {
+  local container_id container_name count=0
 
   command -v docker >/dev/null 2>&1 || {
     error "未检测到 Docker 命令。"
@@ -1227,15 +1227,13 @@ inspect_docker_internal_listeners() {
     error "无法连接 Docker 服务。"
     return 1
   }
-  show_running_docker_containers
-  read -r -p "输入要查看的容器名称或 ID（直接回车返回）：" container_reference
-  [[ -n "$container_reference" ]] || return 0
-  if [[ "$(docker inspect --format '{{.State.Running}}' "$container_reference" 2>/dev/null)" != "true" ]]; then
-    error "容器未运行或不存在：${container_reference}"
-    return 1
-  fi
-  container_name="$(docker inspect --format '{{.Name}}' "$container_reference" 2>/dev/null || true)"
-  show_docker_container_internal_listeners "$container_reference" "${container_name#/}"
+  printf '\n%s全部运行中 Docker 容器的内部监听%s\n' "$BOLD" "$RESET"
+  while IFS='|' read -r container_id container_name; do
+    [[ -n "$container_id" && -n "$container_name" ]] || continue
+    ((count += 1))
+    show_docker_container_internal_listeners "$container_id" "$container_name"
+  done < <(docker ps --format '{{.ID}}|{{.Names}}' 2>/dev/null)
+  (( count > 0 )) || warn "未发现运行中的 Docker 容器。"
 }
 
 docker_network_mode_for_container() {
@@ -2379,11 +2377,11 @@ local_service_listener_assistant() {
   printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
   info "先列出本机服务，再输入需要查看或修改的端口。可将手工启动的 Kopia 接管为 systemd 服务。"
   show_all_local_listeners
-  read -r -p "输入需要管理的 TCP 端口；输入 d 查看 Docker 容器内部监听（直接回车返回）：" port
+  read -r -p "输入需要管理的 TCP 端口；输入 d 查看全部 Docker 容器内部监听（直接回车返回）：" port
   [[ -n "$port" ]] || return 0
   case "$port" in
     d|D)
-      inspect_docker_internal_listeners
+      show_all_docker_internal_listeners
       return
       ;;
   esac
