@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.17"
+readonly MANAGER_VERSION="3.3.18"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1964,8 +1964,8 @@ show_npm_shared_network_guide() {
   if docker network inspect "$shared_network" >/dev/null 2>&1; then
     info "Docker 网络 ${shared_network} 已存在。"
   else
-    read -r -p "立即创建 Docker 共享网络 ${shared_network}？[Y/n]：" create_network_answer
-    create_network_answer="${create_network_answer:-Y}"
+    read -r -p "立即创建 Docker 共享网络 ${shared_network}？[y/N]：" create_network_answer
+    create_network_answer="${create_network_answer:-N}"
     case "$create_network_answer" in
       Y|y)
         if ! docker network create "$shared_network" >/dev/null; then
