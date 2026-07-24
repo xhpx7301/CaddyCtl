@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.26"
+readonly MANAGER_VERSION="3.3.27"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1171,6 +1171,58 @@ show_running_docker_containers() {
   docker ps --format '{{.ID}} | {{.Names}} | {{.Image}}' 2>/dev/null
 }
 
+show_docker_container_internal_listeners() {
+  local container_reference="$1"
+  local container_name="$2"
+  local exposed_ports
+
+  printf '\n%sDocker 容器内部监听%s\n' "$BOLD" "$RESET"
+  printf '容器：%s\n' "$container_name"
+  printf '容器网络 IP（仅供诊断，NPM 共享网络优先使用服务名）：\n'
+  docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}  {{$name}}: {{$network.IPAddress}}{{println}}{{end}}' "$container_reference" 2>/dev/null || true
+
+  if docker exec "$container_reference" ss -ltnp >/dev/null 2>&1; then
+    info "以下为容器网络空间中的实际 TCP 监听地址。"
+    docker exec "$container_reference" ss -ltnp 2>/dev/null | localize_ss_listener_header
+    return 0
+  fi
+  if docker exec "$container_reference" netstat -ltnp >/dev/null 2>&1; then
+    info "以下为容器网络空间中的实际 TCP 监听地址。"
+    docker exec "$container_reference" netstat -ltnp 2>/dev/null
+    return 0
+  fi
+
+  warn "容器内未找到 ss 或 netstat，无法直接检测实际监听地址。"
+  exposed_ports="$(docker inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{println $port}}{{end}}' "$container_reference" 2>/dev/null || true)"
+  if [[ -n "$exposed_ports" ]]; then
+    printf '镜像声明端口（不等同于实际监听）：\n%s\n' "$exposed_ports"
+  else
+    warn "镜像未声明 EXPOSE 端口，请根据应用启动参数或日志确认容器内部端口。"
+  fi
+}
+
+inspect_docker_internal_listeners() {
+  local container_reference container_name
+
+  command -v docker >/dev/null 2>&1 || {
+    error "未检测到 Docker 命令。"
+    return 1
+  }
+  docker info >/dev/null 2>&1 || {
+    error "无法连接 Docker 服务。"
+    return 1
+  }
+  show_running_docker_containers
+  read -r -p "输入要查看的容器名称或 ID（直接回车返回）：" container_reference
+  [[ -n "$container_reference" ]] || return 0
+  if [[ "$(docker inspect --format '{{.State.Running}}' "$container_reference" 2>/dev/null)" != "true" ]]; then
+    error "容器未运行或不存在：${container_reference}"
+    return 1
+  fi
+  container_name="$(docker inspect --format '{{.Name}}' "$container_reference" 2>/dev/null || true)"
+  show_docker_container_internal_listeners "$container_reference" "${container_name#/}"
+}
+
 docker_network_mode_for_container() {
   docker inspect --format '{{.HostConfig.NetworkMode}}' "$1" 2>/dev/null || true
 }
@@ -2312,8 +2364,14 @@ local_service_listener_assistant() {
   printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
   info "先列出本机服务，再输入需要查看或修改的端口。可将手工启动的 Kopia 接管为 systemd 服务。"
   show_all_local_listeners
-  read -r -p "输入需要管理的 TCP 端口（直接回车返回）：" port
+  read -r -p "输入需要管理的 TCP 端口；输入 d 查看 Docker 容器内部监听（直接回车返回）：" port
   [[ -n "$port" ]] || return 0
+  case "$port" in
+    d|D)
+      inspect_docker_internal_listeners
+      return
+      ;;
+  esac
   if ! is_valid_port "$port"; then
     error "端口必须是 1-65535 之间的整数。"
     return 1
@@ -2327,6 +2385,7 @@ local_service_listener_assistant() {
   docker_mapping="$(docker_mapping_for_host_port "$port")"
   if [[ -n "$docker_mapping" ]]; then
     IFS=$'\t' read -r container_id container_name container_port host_ip <<< "$docker_mapping"
+    show_docker_container_internal_listeners "$container_id" "$container_name"
     show_docker_mapping_plan "$container_id" "$container_name" "$container_port" "$host_ip" "$port"
     return
   fi
