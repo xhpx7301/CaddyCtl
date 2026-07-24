@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.29"
+readonly MANAGER_VERSION="3.3.30"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1218,6 +1218,7 @@ show_docker_container_internal_listeners() {
 
 show_all_docker_internal_listeners() {
   local container_id container_name count=0
+  local network_ips listeners exposed_ports detection table
 
   command -v docker >/dev/null 2>&1 || {
     error "未检测到 Docker 命令。"
@@ -1228,12 +1229,46 @@ show_all_docker_internal_listeners() {
     return 1
   }
   printf '\n%s全部运行中 Docker 容器的内部监听%s\n' "$BOLD" "$RESET"
+  table=$'容器名称\t网络 IP（仅诊断）\t内部 TCP 监听\t检测方式'
   while IFS='|' read -r container_id container_name; do
     [[ -n "$container_id" && -n "$container_name" ]] || continue
     ((count += 1))
-    show_docker_container_internal_listeners "$container_id" "$container_name"
+
+    network_ips="$(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}={{$network.IPAddress}}{{println}}{{end}}' "$container_id" 2>/dev/null | paste -sd ',' -)"
+    [[ -n "$network_ips" ]] || network_ips="-"
+
+    listeners=""
+    detection=""
+    if docker exec "$container_id" ss -ltnH >/dev/null 2>&1; then
+      listeners="$(docker exec "$container_id" ss -ltnH 2>/dev/null | awk '{print $4}' | paste -sd ',' -)"
+      detection="ss 实际检测"
+    elif docker exec "$container_id" netstat -ltn >/dev/null 2>&1; then
+      listeners="$(docker exec "$container_id" netstat -ltn 2>/dev/null | awk '$1 ~ /^tcp/ {print $4}' | paste -sd ',' -)"
+      detection="netstat 实际检测"
+    else
+      exposed_ports="$(docker inspect --format '{{range $port, $_ := .Config.ExposedPorts}}{{println $port}}{{end}}' "$container_id" 2>/dev/null | paste -sd ',' -)"
+      if [[ -n "$exposed_ports" ]]; then
+        listeners="声明：${exposed_ports}"
+        detection="无检测工具；仅镜像声明"
+      else
+        listeners="-"
+        detection="无检测工具；未声明端口"
+      fi
+    fi
+    [[ -n "$listeners" ]] || listeners="-"
+    table+=$'\n'"${container_name}"$'\t'"${network_ips}"$'\t'"${listeners}"$'\t'"${detection}"
   done < <(docker ps --format '{{.ID}}|{{.Names}}' 2>/dev/null)
-  (( count > 0 )) || warn "未发现运行中的 Docker 容器。"
+  if (( count == 0 )); then
+    warn "未发现运行中的 Docker 容器。"
+    return 0
+  fi
+
+  if command -v column >/dev/null 2>&1; then
+    printf '%s\n' "$table" | column -t -s $'\t'
+  else
+    printf '%s\n' "$table"
+  fi
+  info "网络 IP 仅用于诊断；NPM 共享网络反代请填写 Docker Compose 服务名和容器内部端口。"
 }
 
 docker_network_mode_for_container() {
