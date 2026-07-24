@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.14"
+readonly MANAGER_VERSION="3.3.15"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1894,7 +1894,7 @@ show_npm_shared_network_guide() {
   local app_container_name="$2"
   local container_port="$3"
   local npm_target npm_container_id npm_container_name npm_image manual_container selection
-  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name
+  local app_network npm_network shared_network="" internal_port app_service npm_service upstream_name default_network
   local -a npm_containers app_networks npm_networks
 
   printf '\n%sDocker 后端 + NPM 共享网络指引%s\n' "$BOLD" "$RESET"
@@ -1943,6 +1943,7 @@ show_npm_shared_network_guide() {
 
   internal_port="${container_port%/tcp}"
   app_service="$(docker_compose_service_or_name "$app_container_id")"
+  npm_service="$(docker_compose_service_or_name "$npm_container_id")"
   upstream_name="${app_service:-$app_container_name}"
   if [[ -n "$shared_network" ]]; then
     success "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 已共享网络：${shared_network}。"
@@ -1952,14 +1953,13 @@ show_npm_shared_network_guide() {
   fi
 
   warn "应用容器 ${app_container_name} 与 NPM ${npm_container_name} 没有共享 Docker 网络。"
-  read -r -p "共享网络名称 [默认 npm-proxy]：" shared_network
-  shared_network="${shared_network:-npm-proxy}"
+  default_network="${npm_service:-$npm_container_name}-${app_service:-$app_container_name}"
+  read -r -p "共享网络名称 [默认 ${default_network}]：" shared_network
+  shared_network="${shared_network:-$default_network}"
   if [[ ! "$shared_network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
     error "Docker 网络名称格式不正确。"
     return 1
   fi
-  npm_service="$(docker_compose_service_or_name "$npm_container_id")"
-
   if docker network inspect "$shared_network" >/dev/null 2>&1; then
     info "Docker 网络 ${shared_network} 已存在。"
   else
@@ -1997,8 +1997,8 @@ show_docker_mapping_plan() {
   printf '容器：%s\n当前映射：%s:%s -> 容器 %s\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
-  printf '  2. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
-  printf '  3. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
+  printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
+  printf '  3. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
@@ -2008,12 +2008,12 @@ show_docker_mapping_plan() {
       show_npm_shared_network_guide "$container_id" "$container_name" "$container_port"
       return
       ;;
-    2) bind_host="127.0.0.1" ;;
-    3)
+    2)
       bind_host="0.0.0.0"
       warn "兼容方案会将端口发布到所有 IPv4 网卡。请限制防火墙来源，仅让 NPM 所在 Docker 网段访问。"
       info "重建容器后，在 NPM 中填写 Docker 网关地址:${host_port}；共享网络方案更安全且无需发布端口。"
       ;;
+    3) bind_host="127.0.0.1" ;;
     4)
       bind_host="0.0.0.0"
       warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
