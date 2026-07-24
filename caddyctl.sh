@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.31"
+readonly MANAGER_VERSION="3.3.32"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2409,17 +2409,21 @@ show_native_listener_launch_info() {
 local_service_listener_assistant() {
   local port listener process docker_mapping container_id container_name container_port host_ip
 
-  printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
-  info "先列出本机服务，再输入需要查看或修改的端口。可将手工启动的 Kopia 接管为 systemd 服务。"
-  show_all_local_listeners
-  read -r -p "输入需要管理的 TCP 端口；输入 d 查看全部 Docker 容器内部监听（直接回车返回）：" port
-  [[ -n "$port" ]] || return 0
-  case "$port" in
-    d|D)
-      show_all_docker_internal_listeners
-      return
-      ;;
-  esac
+  while true; do
+    printf '\n%s本机服务端口监听助手%s\n' "$BOLD" "$RESET"
+    info "先列出本机服务，再输入需要查看或修改的端口。可将手工启动的 Kopia 接管为 systemd 服务。"
+    show_all_local_listeners
+    read -r -p "输入需要管理的 TCP 端口；输入 d 查看全部 Docker 容器内部监听（查询后返回此处；直接回车返回主菜单）：" port
+    [[ -n "$port" ]] || return 0
+    case "$port" in
+      d|D)
+        show_all_docker_internal_listeners
+        read -r -p "按 Enter 键返回本机服务端口监听助手..." _ || true
+        continue
+        ;;
+    esac
+    break
+  done
   if ! is_valid_port "$port"; then
     error "端口必须是 1-65535 之间的整数。"
     return 1
