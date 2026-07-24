@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.12"
+readonly MANAGER_VERSION="3.3.13"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1820,25 +1820,29 @@ manage_generic_systemd_listener() {
   local unit="$3"
   local mode config_path old_address
 
-  printf '\n%s通用 systemd 监听地址管理%s\n' "$BOLD" "$RESET"
-  printf '服务：%s\n当前监听：\n%s\n' "$unit" "$listener"
-  printf '此功能仅替换你明确指定的应用配置文件中的精确地址，不修改 systemd ExecStart。\n'
-  printf '  1. 查看服务详情与 systemd 定义\n'
-  printf '  2. 修改应用配置中的监听地址（自动回滚）\n'
-  printf '  3. 恢复上一次由 CaddyCtl 修改的监听配置\n'
-  printf '  0. 返回\n'
-  read -r -p "请选择 [0-3]：" mode
+  while true; do
+    printf '\n%s通用 systemd 监听地址管理%s\n' "$BOLD" "$RESET"
+    printf '服务：%s\n当前监听：\n%s\n' "$unit" "$listener"
+    printf '此功能仅替换你明确指定的应用配置文件中的精确地址，不修改 systemd ExecStart。\n'
+    printf '  1. 查看服务详情与 systemd 定义\n'
+    printf '  2. 修改应用配置中的监听地址（自动回滚）\n'
+    printf '  3. 恢复上一次由 CaddyCtl 修改的监听配置\n'
+    printf '  0. 返回\n'
+    read -r -p "请选择 [0-3]：" mode
 
-  case "$mode" in
-    1) show_generic_systemd_service_details "$unit" ;;
+    case "$mode" in
+    1)
+      show_generic_systemd_service_details "$unit"
+      read -r -p "按 Enter 键返回通用 systemd 监听地址管理菜单..." _ || true
+      ;;
     2)
-      prompt_generic_systemd_bind_host "$port" || return 0
+      prompt_generic_systemd_bind_host "$port" || continue
       printf '\n请填写应用自身的配置文件和当前监听地址。\n'
       printf '旧地址必须与文件内容完全一致，例如 0.0.0.0:%s 或 127.0.0.1:%s。\n' "$port" "$port"
       read -r -p "应用配置文件绝对路径：" config_path
       read -r -p "配置中的旧监听地址：" old_address
       warn "将把 ${config_path} 中唯一的 ${old_address} 替换为 ${GENERIC_BIND_HOST}:${port}，并重启 ${unit}。"
-      confirm_action "确认继续？" || { info "已取消。"; return 0; }
+      confirm_action "确认继续？" || { info "已取消。"; continue; }
       if apply_generic_systemd_listener_address "$unit" "$port" "$config_path" "$old_address" "$GENERIC_BIND_HOST"; then
         if [[ -n "$GENERIC_NPM_CONTAINER_ID" ]]; then
           verify_npm_gateway_connection "$GENERIC_NPM_CONTAINER_ID" "$GENERIC_NPM_CONTAINER_NAME" "$GENERIC_NPM_GATEWAY" "$port" || true
@@ -1847,8 +1851,9 @@ manage_generic_systemd_listener() {
       ;;
     3) rollback_generic_systemd_listener_address "$unit" "$port" ;;
     0) return 0 ;;
-    *) error "无效选项：$mode"; return 1 ;;
-  esac
+    *) error "无效选项：$mode" ;;
+    esac
+  done
 }
 
 docker_mapping_for_host_port() {
@@ -1858,7 +1863,7 @@ docker_mapping_for_host_port() {
   command -v docker >/dev/null 2>&1 || return 0
   docker info >/dev/null 2>&1 || return 0
   while IFS='|' read -r container_id container_name; do
-    mappings="$(docker inspect --format '{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s|%s|%s\n" $port .HostIp .HostPort}}{{end}}{{end}}' "$container_id" 2>/dev/null || true)"
+    mappings="$(docker inspect --format '{{range $port, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{$port}}|{{.HostIp}}|{{.HostPort}}{{println}}{{end}}{{end}}' "$container_id" 2>/dev/null || true)"
     while IFS='|' read -r container_port host_ip mapped_port; do
       [[ "$mapped_port" == "$host_port" ]] || continue
       printf '%s\t%s\t%s\t%s\n' "$container_id" "$container_name" "$container_port" "$host_ip"
@@ -1991,21 +1996,27 @@ show_docker_mapping_plan() {
   fi
   printf '容器：%s\n当前映射：%s:%s -> 容器 %s\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
-  printf '  1. 仅服务器本机：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
-  printf '  2. 允许服务器公网 IP 访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
-  printf '  3. Docker NPM 共享网络指引（容器间通过服务名访问）\n'
+  printf '  1. Docker NPM 共享网络（推荐：容器间通过服务名访问）\n'
+  printf '  2. 仅服务器本机：127.0.0.1:%s:%s（供宿主机 Caddy 等访问）\n' "$host_port" "$internal_port"
+  printf '  3. Docker NPM 经宿主机网关访问（兼容方案，需发布 0.0.0.0）\n'
+  printf '  4. 允许服务器公网 IP 访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
-  read -r -p "请选择 [0-3]：" mode
+  read -r -p "请选择 [0-4]：" mode
 
   case "$mode" in
-    1) bind_host="127.0.0.1" ;;
-    2)
-      bind_host="0.0.0.0"
-      warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
-      ;;
-    3)
+    1)
       show_npm_shared_network_guide "$container_id" "$container_name" "$container_port"
       return
+      ;;
+    2) bind_host="127.0.0.1" ;;
+    3)
+      bind_host="0.0.0.0"
+      warn "兼容方案会将端口发布到所有 IPv4 网卡。请限制防火墙来源，仅让 NPM 所在 Docker 网段访问。"
+      info "重建容器后，在 NPM 中填写 Docker 网关地址:${host_port}；共享网络方案更安全且无需发布端口。"
+      ;;
+    4)
+      bind_host="0.0.0.0"
+      warn "此容器端口将接受所有 IPv4 网络接口的连接，请限制防火墙来源。"
       ;;
     0) return 0 ;;
     *) error "无效选项：$mode"; return 1 ;;
@@ -2083,6 +2094,12 @@ local_service_listener_assistant() {
     return
   fi
   process="$(printf '%s\n' "$listener" | listener_process_from_details)"
+  if [[ "$process" == "docker-proxy" ]]; then
+    warn "该端口由 Docker 发布，但未能读取容器端口映射，不能按通用 systemd 服务修改。"
+    show_running_docker_containers
+    info "请确认已升级到当前版本，并检查 docker inspect 的 Ports 信息。"
+    return 1
+  fi
   show_native_listener_launch_info "$listener"
   if [[ "$process" == "kopia" ]]; then
     manage_kopia_listener "$port" "$listener"
