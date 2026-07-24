@@ -12,6 +12,8 @@ readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubuserconten
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
 readonly SITES_DIR="/etc/caddy/sites"
+readonly CADDY_CONFIG_DIR="/etc/caddy"
+readonly CADDY_DATA_DIR="/var/lib/caddy"
 readonly BACKUP_DIR="/var/backups/caddyctl"
 readonly MANAGER_DIR="/usr/local/lib/caddyctl"
 readonly MANAGER_SCRIPT="${MANAGER_DIR}/caddyctl.sh"
@@ -460,12 +462,14 @@ uninstall_manager() {
 
 uninstall_everything() {
   warn "这将卸载 Caddy 和 CaddyCtl 管理菜单，停止反向代理服务。"
-  warn "站点配置、Caddyfile、证书和数据目录将被保留，不会删除。"
+  warn "这还将永久删除 Caddy 配置、站点配置、证书数据和 CaddyCtl 备份。"
+  warn "将删除：${CADDY_CONFIG_DIR}、${CADDY_DATA_DIR}、${BACKUP_DIR}。"
   confirm_action "确认完全卸载 Caddy 和 CaddyCtl？" || { info "已取消。"; return 0; }
 
   remove_caddy_package || return 1
   remove_manager_files
-  success "Caddy 和 CaddyCtl 管理菜单已卸载。配置、证书和数据目录保持不变。"
+  rm -rf -- "$CADDY_CONFIG_DIR" "$CADDY_DATA_DIR" "$BACKUP_DIR"
+  success "Caddy、CaddyCtl、配置、证书数据和备份均已完全卸载。"
 }
 
 uninstall_menu() {
@@ -474,7 +478,7 @@ uninstall_menu() {
   printf '\n%s请选择卸载内容%s\n' "$BOLD" "$RESET"
   printf '  1. 卸载 Caddy（保留配置、证书和 CaddyCtl）\n'
   printf '  2. 卸载 CaddyCtl 管理菜单（保留 Caddy、配置和证书）\n'
-  printf '  3. 完全卸载 Caddy 和 CaddyCtl（保留配置和证书）\n'
+  printf '  3. 完全卸载 Caddy 和 CaddyCtl（删除配置、证书和备份）\n'
   printf '  0. 返回\n'
   read -r -p "请选择 [0-3]：" choice
 
