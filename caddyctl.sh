@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.33"
+readonly MANAGER_VERSION="3.3.34"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1748,10 +1748,10 @@ prompt_generic_systemd_bind_host() {
   GENERIC_NPM_CONTAINER_ID=""
   GENERIC_NPM_CONTAINER_NAME=""
   GENERIC_NPM_GATEWAY=""
-  printf '  1. 仅服务器本机：127.0.0.1:%s\n' "$port"
-  printf '  2. Docker NPM 访问宿主机服务（网关模式，自动识别并验证）\n'
-  printf '  3. 允许服务器公网 IP 访问：0.0.0.0:%s\n' "$port"
-  printf '  4. 指定服务器本机 IPv4 地址\n'
+  printf '  1. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s（Docker NPM 不可访问）\n' "$port"
+  printf '  2. [Docker NPM] 经 Docker 网关访问（自动识别并验证）\n'
+  printf '  3. [公网] 所有 IPv4 可访问：0.0.0.0:%s（需配置防火墙）\n' "$port"
+  printf '  4. [指定网卡] 仅指定服务器 IPv4 地址可访问\n'
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
 
@@ -1816,6 +1816,63 @@ prompt_generic_systemd_bind_host() {
     0) return 1 ;;
     *) error "无效选项：$mode"; return 1 ;;
   esac
+}
+
+generic_systemd_config_search_paths() {
+  local unit="$1"
+  local unit_base="${unit%.service}"
+  local environment_file working_directory executable_path directory
+  local -a directories
+
+  while IFS= read -r environment_file; do
+    [[ -n "$environment_file" && -f "$environment_file" ]] && printf '%s\n' "$environment_file"
+  done < <(
+    systemctl cat "$unit" --no-pager 2>/dev/null \
+      | sed -nE 's/^[[:space:]]*EnvironmentFile=-?([^[:space:]"]+).*$/\1/p'
+  )
+
+  working_directory="$(systemctl show "$unit" --property=WorkingDirectory --value 2>/dev/null || true)"
+  executable_path="$(
+    systemctl show "$unit" --property=ExecStart --value 2>/dev/null \
+      | sed -n 's/.*path=\([^ ;}]*\).*/\1/p' | head -n 1
+  )"
+  directories=(
+    "$working_directory"
+    "$(dirname -- "$executable_path" 2>/dev/null || true)"
+    "/etc/${unit_base}"
+  )
+  for directory in "${directories[@]}"; do
+    [[ -n "$directory" && "$directory" != "/" && -d "$directory" ]] || continue
+    find "$directory" -maxdepth 3 -type f \
+      \( -name '*.conf' -o -name '*.config' -o -name '*.env' -o -name '*.ini' \
+         -o -name '*.json' -o -name '*.toml' -o -name '*.yaml' -o -name '*.yml' \) \
+      -print 2>/dev/null
+  done
+  for environment_file in "/etc/default/${unit_base}" "/etc/${unit_base}.conf"; do
+    [[ -f "$environment_file" ]] && printf '%s\n' "$environment_file"
+  done
+}
+
+generic_systemd_listener_config_candidates() {
+  local unit="$1"
+  local port="$2"
+  local config_path address match_lines
+  local -a addresses=(
+    "127.0.0.1:${port}"
+    "0.0.0.0:${port}"
+    "*:${port}"
+    "[::]:${port}"
+    ":::${port}"
+  )
+
+  while IFS= read -r config_path; do
+    [[ -f "$config_path" && -r "$config_path" ]] || continue
+    grep -Iq . "$config_path" 2>/dev/null || continue
+    for address in "${addresses[@]}"; do
+      match_lines="$(grep -Foc -- "$address" "$config_path" 2>/dev/null || true)"
+      [[ "$match_lines" == "1" ]] && printf '%s\t%s\n' "$config_path" "$address"
+    done
+  done < <(generic_systemd_config_search_paths "$unit" | awk 'NF && !seen[$0]++')
 }
 
 apply_generic_systemd_listener_address() {
@@ -1931,12 +1988,13 @@ manage_generic_systemd_listener() {
   local port="$1"
   local listener="$2"
   local unit="$3"
-  local mode config_path old_address
+  local mode config_path old_address selection automatic_answer selected_candidate
+  local -a config_candidates
 
   while true; do
     printf '\n%s通用 systemd 监听地址管理%s\n' "$BOLD" "$RESET"
     printf '服务：%s\n当前监听：\n%s\n' "$unit" "$listener"
-    printf '此功能仅替换你明确指定的应用配置文件中的精确地址，不修改 systemd ExecStart。\n'
+    printf '优先自动识别应用配置中的精确地址；不会修改 systemd ExecStart。\n'
     printf '  1. 查看服务详情与 systemd 定义\n'
     printf '  2. 修改应用配置中的监听地址（自动回滚）\n'
     printf '  3. 恢复上一次由 CaddyCtl 修改的监听配置\n'
@@ -1950,7 +2008,47 @@ manage_generic_systemd_listener() {
       ;;
     2)
       prompt_generic_systemd_bind_host "$port" || continue
-      printf '\n请填写应用自身的配置文件和当前监听地址。\n'
+      mapfile -t config_candidates < <(generic_systemd_listener_config_candidates "$unit" "$port")
+      if (( ${#config_candidates[@]} > 0 )); then
+        printf '\n%s自动识别到的应用监听配置%s\n' "$BOLD" "$RESET"
+        if (( ${#config_candidates[@]} == 1 )); then
+          selected_candidate="${config_candidates[0]}"
+        else
+          for ((selection = 0; selection < ${#config_candidates[@]}; selection++)); do
+            IFS=$'\t' read -r config_path old_address <<< "${config_candidates[$selection]}"
+            printf '  %d. %s（当前：%s）\n' "$((selection + 1))" "$config_path" "$old_address"
+          done
+          read -r -p "请选择 [1-${#config_candidates[@]}]（直接回车改为手动填写）：" selection
+          if [[ -z "$selection" ]]; then
+            config_candidates=()
+          elif [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#config_candidates[@]} )); then
+            selected_candidate="${config_candidates[$((selection - 1))]}"
+          else
+            error "无效选项：$selection"
+            continue
+          fi
+        fi
+        if (( ${#config_candidates[@]} > 0 )); then
+          IFS=$'\t' read -r config_path old_address <<< "$selected_candidate"
+          info "已识别配置：${config_path}；当前监听：${old_address}。"
+          read -r -p "自动备份、替换为 ${GENERIC_BIND_HOST}:${port} 并重启 ${unit}？[y/N]：" automatic_answer
+          automatic_answer="${automatic_answer:-N}"
+          case "$automatic_answer" in
+            Y|y)
+              if apply_generic_systemd_listener_address "$unit" "$port" "$config_path" "$old_address" "$GENERIC_BIND_HOST"; then
+                if [[ -n "$GENERIC_NPM_CONTAINER_ID" ]]; then
+                  verify_npm_gateway_connection "$GENERIC_NPM_CONTAINER_ID" "$GENERIC_NPM_CONTAINER_NAME" "$GENERIC_NPM_GATEWAY" "$port" || true
+                fi
+              fi
+              continue
+              ;;
+            N|n) info "已取消自动修改。"; continue ;;
+            *) error "请输入 y 或 n。"; continue ;;
+          esac
+        fi
+      fi
+      warn "未自动识别到唯一的文本配置监听地址，需手动指定。"
+      info "端口存储在数据库或面板内部的服务不会被直接修改。"
       printf '旧地址必须与文件内容完全一致，例如 0.0.0.0:%s 或 127.0.0.1:%s。\n' "$port" "$port"
       read -r -p "应用配置文件绝对路径：" config_path
       read -r -p "配置中的旧监听地址：" old_address
