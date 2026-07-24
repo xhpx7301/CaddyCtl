@@ -6,6 +6,17 @@
 它不会替代官方 `caddy` CLI：日常管理使用 `caddyctl`，需要调用 Caddy 原生命令时
 仍使用 `caddy`。
 
+## 快速开始
+
+在支持的 Linux 服务器 SSH 终端中执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/install.sh | bash
+```
+
+安装器会安装并打开 `caddyctl` 管理菜单。随后依次选择“安装或更新 Caddy”和
+“新增反向代理”即可开始配置站点。
+
 ## 特性
 
 | 能力 | 说明 |
@@ -27,32 +38,33 @@
 
 ## 安装
 
-为避免在公开文档中固化仓库所有者、内部镜像或个人地址，请将下列占位符替换为项目
-发布地址。推荐在可交互的 SSH 终端中执行。
+推荐在可交互的 SSH 终端中执行一键安装：
 
 ```bash
-curl -fsSL <INSTALL_SCRIPT_URL> | bash
+curl -fsSL https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/install.sh | bash
 ```
 
 安装器只安装 `caddyctl` 管理入口并打开菜单，不会在未确认的情况下立即安装 Caddy。
-也可以从已获取的源码目录运行：
+若希望先查看脚本内容或在本地修改后运行，可使用 Git 克隆：
 
 ```bash
+git clone https://github.com/xhpx7301/CaddyCtl.git
+cd CaddyCtl
 chmod +x install.sh
 ./install.sh
 ```
 
-若使用私有镜像或自托管源，可通过 `CADDYCTL_SOURCE_URL` 指定管理脚本下载地址：
-
-```bash
-export CADDYCTL_SOURCE_URL="https://<HOST>/<PATH>/caddyctl.sh"
-./install.sh
-```
-
-安装完成后，使用以下命令打开菜单：
+安装完成后，使用以下命令重新打开菜单：
 
 ```bash
 caddyctl
+```
+
+若维护私有镜像或自托管源，可通过 `CADDYCTL_SOURCE_URL` 指定管理脚本下载地址：
+
+```bash
+export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
+./install.sh
 ```
 
 ## 命令选项
