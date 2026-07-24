@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.24"
+readonly MANAGER_VERSION="3.3.25"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1082,9 +1082,15 @@ diagnose_upstream() {
   diagnose_upstream_target "手动检测服务" "$upstream_scheme" "$upstream_host" "$upstream_port"
 }
 
-print_ss_listener_header() {
-  printf '%-10s %-10s %-10s %-30s %-30s %s\n' \
-    '状态' '接收队列' '发送队列' '本地监听地址:端口' '对端地址:端口' '进程'
+localize_ss_listener_header() {
+  sed '1 {
+    s/State/状态/
+    s/Recv-Q/接收队列/
+    s/Send-Q/发送队列/
+    s/Local Address:Port/本地监听地址:端口/
+    s/Peer Address:Port/对端地址:端口/
+    s/Process/进程/
+  }'
 }
 
 show_all_local_listeners() {
@@ -1092,8 +1098,7 @@ show_all_local_listeners() {
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
   info "docker-proxy 表示宿主机发布端口；容器内部监听位于独立网络空间，需在 Docker 映射详情中查看端口。"
   if command -v ss >/dev/null 2>&1; then
-    print_ss_listener_header
-    ss -ltnpH 2>/dev/null
+    ss -ltnp 2>/dev/null | localize_ss_listener_header
   elif command -v netstat >/dev/null 2>&1; then
     netstat -ltnp 2>/dev/null
   else
@@ -2207,7 +2212,7 @@ show_docker_mapping_plan() {
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
   printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
-  printf '  3. [宿主机 Caddy] 仅本机端口：127.0.0.1:%s:%s（需发布 127.0.0.1；可与选项 1 共用）\n' "$host_port" "$internal_port"
+  printf '  3. [宿主机 Caddy] 发布端口改为：127.0.0.1:%s:%s（不改容器内部端口；可与选项 1 共用）\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
@@ -2224,6 +2229,7 @@ show_docker_mapping_plan() {
       ;;
     3)
       bind_host="127.0.0.1"
+      info "仅修改宿主机发布地址为 127.0.0.1:${host_port}；容器内部端口仍为 ${internal_port}。"
       info "此端口供宿主机上的 Caddy、Nginx 等反代；Docker 内的 NPM 不能经 127.0.0.1:${host_port} 访问。"
       info "若已选择选项 1 共享网络，NPM 仍可使用 ${service:-应用服务名}:${internal_port} 直连应用。"
       ;;
@@ -2417,8 +2423,7 @@ show_logs() {
 show_listeners() {
   printf '\n%sCaddy 端口监听与 Docker 映射%s\n' "$BOLD" "$RESET"
   if command -v ss >/dev/null 2>&1; then
-    print_ss_listener_header
-    ss -ltnpH 2>/dev/null | sed -n '/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
+    ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p' | localize_ss_listener_header
   elif command -v netstat >/dev/null 2>&1; then
     netstat -ltnp 2>/dev/null | sed -n '1,2p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
   else
