@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.13"
+readonly MANAGER_VERSION="3.3.14"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1996,10 +1996,10 @@ show_docker_mapping_plan() {
   fi
   printf '容器：%s\n当前映射：%s:%s -> 容器 %s\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
-  printf '  1. Docker NPM 共享网络（推荐：容器间通过服务名访问）\n'
-  printf '  2. 仅服务器本机：127.0.0.1:%s:%s（供宿主机 Caddy 等访问）\n' "$host_port" "$internal_port"
-  printf '  3. Docker NPM 经宿主机网关访问（兼容方案，需发布 0.0.0.0）\n'
-  printf '  4. 允许服务器公网 IP 访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
+  printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
+  printf '  2. [宿主机 Caddy] 仅本机反代：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
+  printf '  3. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
+  printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
 
