@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.27"
+readonly MANAGER_VERSION="3.3.28"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1093,6 +1093,21 @@ localize_ss_listener_header() {
   }'
 }
 
+localize_netstat_listener_header() {
+  sed '1 {
+    s/Active Internet connections (only servers)/TCP 监听端口（仅服务端）/
+  }
+  2 {
+    s/Proto/协议/
+    s/Recv-Q/接收队列/
+    s/Send-Q/发送队列/
+    s/Local Address/本地地址/
+    s/Foreign Address/远端限制/
+    s/State/状态/
+    s/PID\/Program name/进程/
+  }'
+}
+
 show_all_local_listeners() {
   printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
@@ -1101,7 +1116,7 @@ show_all_local_listeners() {
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | localize_ss_listener_header
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -ltnp 2>/dev/null
+    netstat -ltnp 2>/dev/null | localize_netstat_listener_header
   else
     warn "未找到 ss 或 netstat，无法查看本机监听状态。"
   fi
@@ -1188,7 +1203,7 @@ show_docker_container_internal_listeners() {
   fi
   if docker exec "$container_reference" netstat -ltnp >/dev/null 2>&1; then
     info "以下为容器网络空间中的实际 TCP 监听地址。"
-    docker exec "$container_reference" netstat -ltnp 2>/dev/null
+    docker exec "$container_reference" netstat -ltnp 2>/dev/null | localize_netstat_listener_header
     return 0
   fi
 
@@ -2485,7 +2500,7 @@ show_listeners() {
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | sed -n '1p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p' | localize_ss_listener_header
   elif command -v netstat >/dev/null 2>&1; then
-    netstat -ltnp 2>/dev/null | sed -n '1,2p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p'
+    netstat -ltnp 2>/dev/null | sed -n '1,2p;/caddy/p;/docker-proxy/p;/:80 /p;/:443 /p' | localize_netstat_listener_header
   else
     warn "未找到 ss 或 netstat。"
   fi
