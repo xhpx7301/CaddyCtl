@@ -2721,19 +2721,19 @@ draw_menu() {
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   status_line
   printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
-  printf '  1. 查看运行状态\n'
-  printf '  2. 安装或更新 Caddy\n'
-  printf '  3. 更新 CaddyCtl 管理菜单\n'
-  printf '  4. 卸载 Caddy 或 CaddyCtl\n'
+  printf '  1. 更新 CaddyCtl 管理菜单\n'
+  printf '  2. 本机服务端口监听助手\n'
+  printf '  3. 查看运行状态\n'
+  printf '  4. 安装或更新 Caddy\n'
   printf '  5. 新增反向代理\n'
   printf '  6. 修改现有反向代理\n'
   printf '  7. 查看当前反向代理配置\n'
   printf '  8. 删除反向代理\n'
   printf '  9. 校验并重载 Caddy\n'
-  printf ' 10. 查看 Caddy 服务日志\n'
-  printf ' 11. 查看 Caddy 端口监听与 Docker 映射\n'
-  printf ' 12. 检测 Caddy 后端服务监听与连通性\n'
-  printf ' 13. 本机服务端口监听助手\n'
+  printf ' 10. 查看 Caddy 端口监听与 Docker 映射\n'
+  printf ' 11. 检测 Caddy 后端服务监听与连通性\n'
+  printf ' 12. 查看 Caddy 服务日志\n'
+  printf ' 13. 卸载 Caddy 或 CaddyCtl\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   printf '提示：退出后可在终端输入 caddyctl 再次打开本菜单。\n'
@@ -2781,19 +2781,19 @@ main_menu() {
     printf '\n'
 
     case "$choice" in
-      1) show_status_detail; pause_menu ;;
-      2) install_or_update_caddy; pause_menu ;;
-      3) update_manager; pause_menu ;;
-      4) uninstall_menu; pause_menu ;;
+      1) update_manager; pause_menu ;;
+      2) local_service_listener_assistant; pause_menu ;;
+      3) show_status_detail; pause_menu ;;
+      4) install_or_update_caddy; pause_menu ;;
       5) configure_proxy; pause_menu ;;
       6) edit_proxy_config; pause_menu ;;
       7) show_config; pause_menu ;;
       8) delete_proxy; pause_menu ;;
       9) validate_and_reload; pause_menu ;;
-      10) show_logs; pause_menu ;;
-      11) show_listeners; pause_menu ;;
-      12) diagnose_upstream; pause_menu ;;
-      13) local_service_listener_assistant; pause_menu ;;
+      10) show_listeners; pause_menu ;;
+      11) diagnose_upstream; pause_menu ;;
+      12) show_logs; pause_menu ;;
+      13) uninstall_menu; pause_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac
