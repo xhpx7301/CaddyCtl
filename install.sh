@@ -25,21 +25,66 @@ cache_busted_github_raw_url() {
   esac
 }
 
-download_manager() {
-  local download_url
+download_url_to_file() {
+  local source_url="$1"
+  local destination="$2"
 
-  download_url="$(cache_busted_github_raw_url "$SOURCE_URL")"
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --proto '=https' --tlsv1.2 \
+      --retry 3 --retry-delay 1 --connect-timeout 15 \
       -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-      "$download_url" -o "$MANAGER_SCRIPT"
+      "$source_url" -o "$destination"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$MANAGER_SCRIPT" \
+    wget -qO "$destination" \
+      --tries=3 --timeout=15 \
       --header='Cache-Control: no-cache' --header='Pragma: no-cache' \
-      "$download_url"
+      "$source_url"
   else
-    printf '需要 curl 或 wget 才能下载安装程序。\n' >&2
-    exit 1
+    return 1
+  fi
+}
+
+github_raw_immutable_url() {
+  local source_url="$1"
+  local owner repository revision path api_url commit
+
+  if [[ "$source_url" =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/?]+)/([^?]+)$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repository="${BASH_REMATCH[2]}"
+    revision="${BASH_REMATCH[3]}"
+    path="${BASH_REMATCH[4]}"
+  else
+    return 1
+  fi
+  api_url="https://api.github.com/repos/${owner}/${repository}/commits/${revision}"
+
+  if command -v curl >/dev/null 2>&1; then
+    commit="$(curl -fsSL --proto '=https' --tlsv1.2 \
+      --retry 2 --retry-delay 1 --connect-timeout 15 \
+      -H 'Accept: application/vnd.github+json' "$api_url" \
+      | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    commit="$(wget -qO- --tries=2 --timeout=15 \
+      --header='Accept: application/vnd.github+json' "$api_url" \
+      | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)" || return 1
+  else
+    return 1
+  fi
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf 'https://raw.githubusercontent.com/%s/%s/%s/%s\n' "$owner" "$repository" "$commit" "$path"
+}
+
+download_manager() {
+  local immutable_url download_url
+
+  immutable_url="$(github_raw_immutable_url "$SOURCE_URL" || true)"
+  if [[ -n "$immutable_url" ]] && download_url_to_file "$immutable_url" "$MANAGER_SCRIPT"; then
+    return 0
+  fi
+  download_url="$(cache_busted_github_raw_url "$SOURCE_URL")"
+  if ! download_url_to_file "$download_url" "$MANAGER_SCRIPT"; then
+    printf '需要可用的 curl 或 wget，且无法下载 CaddyCtl 安装程序。\n' >&2
+    return 1
   fi
 }
 

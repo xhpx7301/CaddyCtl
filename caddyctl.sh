@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.37"
+readonly MANAGER_VERSION="3.3.39"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -173,22 +173,66 @@ cache_busted_github_raw_url() {
   esac
 }
 
-download_manager_script() {
-  local destination="$1"
-  local source_url
-
-  source_url="$(cache_busted_github_raw_url "$MANAGER_SOURCE_URL")"
+download_url_to_file() {
+  local source_url="$1"
+  local destination="$2"
 
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL --proto '=https' --tlsv1.2 \
+      --retry 3 --retry-delay 1 --connect-timeout 15 \
       -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
       "$source_url" -o "$destination"
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$destination" \
+      --tries=3 --timeout=15 \
       --header='Cache-Control: no-cache' --header='Pragma: no-cache' \
       "$source_url"
   else
-    error "需要 curl 或 wget 才能下载 CaddyCtl 更新。"
+    return 1
+  fi
+}
+
+github_raw_immutable_url() {
+  local source_url="$1"
+  local owner repository revision path api_url commit
+
+  if [[ "$source_url" =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/?]+)/([^?]+)$ ]]; then
+    owner="${BASH_REMATCH[1]}"
+    repository="${BASH_REMATCH[2]}"
+    revision="${BASH_REMATCH[3]}"
+    path="${BASH_REMATCH[4]}"
+  else
+    return 1
+  fi
+  api_url="https://api.github.com/repos/${owner}/${repository}/commits/${revision}"
+
+  if command -v curl >/dev/null 2>&1; then
+    commit="$(curl -fsSL --proto '=https' --tlsv1.2 \
+      --retry 2 --retry-delay 1 --connect-timeout 15 \
+      -H 'Accept: application/vnd.github+json' "$api_url" \
+      | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)" || return 1
+  elif command -v wget >/dev/null 2>&1; then
+    commit="$(wget -qO- --tries=2 --timeout=15 \
+      --header='Accept: application/vnd.github+json' "$api_url" \
+      | sed -n 's/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)" || return 1
+  else
+    return 1
+  fi
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf 'https://raw.githubusercontent.com/%s/%s/%s/%s\n' "$owner" "$repository" "$commit" "$path"
+}
+
+download_manager_script() {
+  local destination="$1"
+  local immutable_url source_url
+
+  immutable_url="$(github_raw_immutable_url "$MANAGER_SOURCE_URL" || true)"
+  if [[ -n "$immutable_url" ]] && download_url_to_file "$immutable_url" "$destination"; then
+    return 0
+  fi
+  source_url="$(cache_busted_github_raw_url "$MANAGER_SOURCE_URL")"
+  if ! download_url_to_file "$source_url" "$destination"; then
+    error "需要可用的 curl 或 wget，且无法下载 CaddyCtl 更新。"
     return 1
   fi
 }
@@ -1133,11 +1177,11 @@ format_listener_table() {
       next
     }
     NR == 1 {
-      print "状态\t接收队列\t发送队列\t本地监听地址:端口\t对端地址:端口\t服务名称\t进程"
+      print "STAT\tRECV-Q__\tSEND-Q__\tLOCAL-ADDRESS:PORT\tPEER-ADDRESS:PORT\tSERVICE_\tPROC"
       next
     }
     NR == 2 && listener_command == "netstat" {
-      print "协议\t接收队列\t发送队列\t本地监听地址:端口\t对端地址:端口\t状态\t服务名称\t进程"
+      print "PROT\tRECV-Q__\tSEND-Q__\tLOCAL-ADDRESS:PORT\tPEER-ADDRESS:PORT\tSTAT\tSERVICE_\tPROC"
       next
     }
     {
@@ -1178,14 +1222,20 @@ format_listener_table() {
   '
 }
 
+localize_listener_table_header() {
+  sed \
+    -e '/^STAT/ { s/STAT/状态/; s/RECV-Q__/接收队列/; s/SEND-Q__/发送队列/; s/LOCAL-ADDRESS:PORT/本地监听地址:端口 /; s/PEER-ADDRESS:PORT/对端地址:端口    /; s/SERVICE_/服务名称/; s/PROC/进程/; }' \
+    -e '/^PROT/ { s/PROT/协议/; s/RECV-Q__/接收队列/; s/SEND-Q__/发送队列/; s/LOCAL-ADDRESS:PORT/本地监听地址:端口 /; s/PEER-ADDRESS:PORT/对端地址:端口    /; s/STAT/状态/; s/SERVICE_/服务名称/; s/PROC/进程/; }'
+}
+
 localize_ss_listener_header() {
   local docker_services
 
   docker_services="$(docker_published_listener_services)"
   if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" ss | column -t -s $'\t' -o '    '
+    format_listener_table "$docker_services" ss | column -t -s $'\t' -o '    ' | localize_listener_table_header
   else
-    format_listener_table "$docker_services" ss
+    format_listener_table "$docker_services" ss | localize_listener_table_header
   fi
 }
 
@@ -1194,9 +1244,9 @@ localize_netstat_listener_header() {
 
   docker_services="$(docker_published_listener_services)"
   if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" netstat | column -t -s $'\t' -o '    '
+    format_listener_table "$docker_services" netstat | column -t -s $'\t' -o '    ' | localize_listener_table_header
   else
-    format_listener_table "$docker_services" netstat
+    format_listener_table "$docker_services" netstat | localize_listener_table_header
   fi
 }
 
