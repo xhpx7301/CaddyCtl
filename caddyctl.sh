@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.36"
+readonly MANAGER_VERSION="3.3.37"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1166,7 +1166,7 @@ format_listener_table() {
           service = by_port[port]
         }
         if (service == "") {
-          service = "Docker（未识别）"
+          service = "未知"
         }
       }
       if (listener_command == "netstat") {
