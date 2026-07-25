@@ -1086,37 +1086,125 @@ diagnose_upstream() {
   diagnose_upstream_target "手动检测服务" "$upstream_scheme" "$upstream_host" "$upstream_port"
 }
 
+docker_published_listener_services() {
+  local container_id
+
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+    docker inspect --format '{{range $containerPort, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s\t%s\t" .HostIp .HostPort}}{{with index $.Config.Labels "com.docker.compose.service"}}{{.}}{{else}}{{$.Name}}{{end}}{{println}}{{end}}{{end}}' "$container_id" 2>/dev/null
+  done < <(docker ps -q 2>/dev/null)
+}
+
+format_listener_table() {
+  local docker_services="$1"
+  local listener_command="$2"
+
+  awk -v docker_services="$docker_services" -v listener_command="$listener_command" '
+    function normalized_host(host) {
+      sub(/^\[/, "", host)
+      sub(/\]$/, "", host)
+      return host
+    }
+    function add_service(services, key, service, current) {
+      current = services[key]
+      if (current == "") {
+        services[key] = service
+      } else if (index("," current ",", "," service ",") == 0) {
+        services[key] = current "," service
+      }
+    }
+    BEGIN {
+      mapping_count = split(docker_services, mappings, "\n")
+      for (i = 1; i <= mapping_count; i++) {
+        field_count = split(mappings[i], fields, "\t")
+        if (field_count < 3 || fields[1] == "" || fields[2] == "" || fields[3] == "") {
+          continue
+        }
+        sub(/^\/+/, "", fields[3])
+        host = normalized_host(fields[1])
+        add_service(by_binding, host SUBSEP fields[2], fields[3])
+        add_service(by_port, fields[2], fields[3])
+      }
+    }
+    NR == 1 && listener_command == "netstat" {
+      print "TCP 监听端口（仅服务端）"
+      next
+    }
+    NR == 1 {
+      print "状态\t接收队列\t发送队列\t本地监听地址:端口\t对端地址:端口\t服务名称\t进程"
+      next
+    }
+    NR == 2 && listener_command == "netstat" {
+      print "协议\t接收队列\t发送队列\t本地监听地址:端口\t对端地址:端口\t状态\t服务名称\t进程"
+      next
+    }
+    {
+      minimum_fields = listener_command == "netstat" ? 6 : 5
+      process_field = listener_command == "netstat" ? 7 : 6
+    }
+    NF < minimum_fields {
+      print
+      next
+    }
+    {
+      process = ""
+      for (i = process_field; i <= NF; i++) {
+        process = process (process == "" ? "" : " ") $i
+      }
+      service = "-"
+      if (process ~ /docker-proxy/) {
+        address = $4
+        port = address
+        sub(/^.*:/, "", port)
+        host = address
+        sub(/:[^:]*$/, "", host)
+        host = normalized_host(host)
+        service = by_binding[host SUBSEP port]
+        if (service == "") {
+          service = by_port[port]
+        }
+        if (service == "") {
+          service = "Docker（未识别）"
+        }
+      }
+      if (listener_command == "netstat") {
+        print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" service "\t" process
+      } else {
+        print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" service "\t" process
+      }
+    }
+  '
+}
+
 localize_ss_listener_header() {
-  sed '1 {
-    s/State/状态/
-    s/Recv-Q/接收队列/
-    s/Send-Q/发送队列/
-    s/Local Address:Port/本地监听地址:端口/
-    s/Peer Address:Port/远端限制/
-    s/Process/进程/
-  }'
+  local docker_services
+
+  docker_services="$(docker_published_listener_services)"
+  if command -v column >/dev/null 2>&1; then
+    format_listener_table "$docker_services" ss | column -t -s $'\t'
+  else
+    format_listener_table "$docker_services" ss
+  fi
 }
 
 localize_netstat_listener_header() {
-  sed '1 {
-    s/Active Internet connections (only servers)/TCP 监听端口（仅服务端）/
-  }
-  2 {
-    s/Proto/协议/
-    s/Recv-Q/接收队列/
-    s/Send-Q/发送队列/
-    s/Local Address/本地地址/
-    s/Foreign Address/远端限制/
-    s/State/状态/
-    s/PID\/Program name/进程/
-  }'
+  local docker_services
+
+  docker_services="$(docker_published_listener_services)"
+  if command -v column >/dev/null 2>&1; then
+    format_listener_table "$docker_services" netstat | column -t -s $'\t'
+  else
+    format_listener_table "$docker_services" netstat
+  fi
 }
 
 show_all_local_listeners() {
   printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
-  info "远端限制在 LISTEN 状态通常显示 0.0.0.0:* 或 [::]:*，表示可接受的连接范围，不是 Docker 容器地址。"
-  info "docker-proxy 表示宿主机发布端口；容器内部监听位于独立网络空间，需在 Docker 映射详情中查看端口。"
+  info "对端地址在 LISTEN 状态通常显示 0.0.0.0:* 或 [::]:*，表示可接受的连接范围，不是 Docker 容器地址。"
+  info "docker-proxy 表示宿主机发布端口；服务名称列优先显示 Compose 服务名，否则显示容器名。"
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | localize_ss_listener_header
   elif command -v netstat >/dev/null 2>&1; then
