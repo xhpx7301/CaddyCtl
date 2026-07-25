@@ -1183,7 +1183,7 @@ localize_ss_listener_header() {
 
   docker_services="$(docker_published_listener_services)"
   if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" ss | column -t -s $'\t'
+    format_listener_table "$docker_services" ss | column -t -s $'\t' -o '    '
   else
     format_listener_table "$docker_services" ss
   fi
@@ -1194,7 +1194,7 @@ localize_netstat_listener_header() {
 
   docker_services="$(docker_published_listener_services)"
   if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" netstat | column -t -s $'\t'
+    format_listener_table "$docker_services" netstat | column -t -s $'\t' -o '    '
   else
     format_listener_table "$docker_services" netstat
   fi
