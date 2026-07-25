@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.39"
+readonly MANAGER_VERSION="3.3.40"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1159,7 +1159,51 @@ format_listener_table() {
         services[key] = current "," service
       }
     }
+    function visible_length(value) {
+      return value == "未知" ? 4 : length(value)
+    }
+    function print_spaces(count, i) {
+      for (i = 0; i < count; i++) {
+        printf " "
+      }
+    }
+    function print_header_field(label, label_width, field_width) {
+      printf "%s", label
+      print_spaces(field_width - label_width + 2)
+    }
+    function print_data_field(value, field_width) {
+      printf "%s", value
+      print_spaces(field_width - visible_length(value) + 2)
+    }
+    function print_table_header() {
+      if (listener_command == "netstat") {
+        print_header_field("协议", 4, width[1])
+      } else {
+        print_header_field("状态", 4, width[1])
+      }
+      print_header_field("接收队列", 8, width[2])
+      print_header_field("发送队列", 8, width[3])
+      print_header_field("本地监听地址:端口", 17, width[4])
+      print_header_field("对端地址:端口", 13, width[5])
+      if (listener_command == "netstat") {
+        print_header_field("状态", 4, width[6])
+        print_header_field("服务名称", 8, width[7])
+      } else {
+        print_header_field("服务名称", 8, width[6])
+      }
+      print "进程"
+    }
     BEGIN {
+      width[1] = 7
+      width[2] = 8
+      width[3] = 8
+      width[4] = 18
+      width[5] = 17
+      width[6] = 7
+      width[7] = 12
+      if (listener_command != "netstat") {
+        width[6] = 12
+      }
       mapping_count = split(docker_services, mappings, "\n")
       for (i = 1; i <= mapping_count; i++) {
         field_count = split(mappings[i], fields, "\t")
@@ -1172,27 +1216,17 @@ format_listener_table() {
         add_service(by_port, fields[2], fields[3])
       }
     }
-    NR == 1 && listener_command == "netstat" {
-      print "TCP 监听端口（仅服务端）"
+    listener_command == "netstat" && NR <= 2 {
       next
     }
-    NR == 1 {
-      print "STAT\tRECV-Q__\tSEND-Q__\tLOCAL-ADDRESS:PORT\tPEER-ADDRESS:PORT\tSERVICE_\tPROC"
+    listener_command != "netstat" && NR == 1 {
       next
     }
-    NR == 2 && listener_command == "netstat" {
-      print "PROT\tRECV-Q__\tSEND-Q__\tLOCAL-ADDRESS:PORT\tPEER-ADDRESS:PORT\tSTAT\tSERVICE_\tPROC"
+    NF < (listener_command == "netstat" ? 6 : 5) {
       next
     }
     {
-      minimum_fields = listener_command == "netstat" ? 6 : 5
       process_field = listener_command == "netstat" ? 7 : 6
-    }
-    NF < minimum_fields {
-      print
-      next
-    }
-    {
       process = ""
       for (i = process_field; i <= NF; i++) {
         process = process (process == "" ? "" : " ") $i
@@ -1213,41 +1247,65 @@ format_listener_table() {
           service = "未知"
         }
       }
+      row_count++
+      field[row_count, 1] = $1
+      field[row_count, 2] = $2
+      field[row_count, 3] = $3
+      field[row_count, 4] = $4
+      field[row_count, 5] = $5
       if (listener_command == "netstat") {
-        print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" service "\t" process
+        field[row_count, 6] = $6
+        field[row_count, 7] = service
+        field[row_count, 8] = process
+        for (i = 1; i <= 7; i++) {
+          if (visible_length(field[row_count, i]) > width[i]) {
+            width[i] = visible_length(field[row_count, i])
+          }
+        }
       } else {
-        print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" service "\t" process
+        field[row_count, 6] = service
+        field[row_count, 7] = process
+        for (i = 1; i <= 6; i++) {
+          if (visible_length(field[row_count, i]) > width[i]) {
+            width[i] = visible_length(field[row_count, i])
+          }
+        }
+      }
+    }
+    END {
+      if (listener_command == "netstat") {
+        print "TCP 监听端口（仅服务端）"
+      }
+      print_table_header()
+      for (row = 1; row <= row_count; row++) {
+        if (listener_command == "netstat") {
+          for (i = 1; i <= 7; i++) {
+            print_data_field(field[row, i], width[i])
+          }
+          print field[row, 8]
+        } else {
+          for (i = 1; i <= 6; i++) {
+            print_data_field(field[row, i], width[i])
+          }
+          print field[row, 7]
+        }
       }
     }
   '
-}
-
-localize_listener_table_header() {
-  sed \
-    -e '/^STAT/ { s/STAT/状态/; s/RECV-Q__/接收队列/; s/SEND-Q__/发送队列/; s/LOCAL-ADDRESS:PORT/本地监听地址:端口 /; s/PEER-ADDRESS:PORT/对端地址:端口    /; s/SERVICE_/服务名称/; s/PROC/进程/; }' \
-    -e '/^PROT/ { s/PROT/协议/; s/RECV-Q__/接收队列/; s/SEND-Q__/发送队列/; s/LOCAL-ADDRESS:PORT/本地监听地址:端口 /; s/PEER-ADDRESS:PORT/对端地址:端口    /; s/STAT/状态/; s/SERVICE_/服务名称/; s/PROC/进程/; }'
 }
 
 localize_ss_listener_header() {
   local docker_services
 
   docker_services="$(docker_published_listener_services)"
-  if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" ss | column -t -s $'\t' -o '    ' | localize_listener_table_header
-  else
-    format_listener_table "$docker_services" ss | localize_listener_table_header
-  fi
+  format_listener_table "$docker_services" ss
 }
 
 localize_netstat_listener_header() {
   local docker_services
 
   docker_services="$(docker_published_listener_services)"
-  if command -v column >/dev/null 2>&1; then
-    format_listener_table "$docker_services" netstat | column -t -s $'\t' -o '    ' | localize_listener_table_header
-  else
-    format_listener_table "$docker_services" netstat | localize_listener_table_header
-  fi
+  format_listener_table "$docker_services" netstat
 }
 
 show_all_local_listeners() {
