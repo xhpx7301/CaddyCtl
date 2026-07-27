@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.40"
+readonly MANAGER_VERSION="3.3.41"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2344,7 +2344,7 @@ replace_compose_port_mapping() {
   local host_port="$3"
   local internal_port="$4"
   local bind_host="$5"
-  local temp_file line mapping_regex port_suffix line_suffix match_count=0
+  local temp_file line mapping_regex port_suffix line_suffix match_count=0 variable_mapping_detected=false
 
   [[ -r "$config_path" && -w "$config_path" ]] || {
     error "Compose 配置文件不可读或不可写：${config_path}"
@@ -2358,6 +2358,7 @@ replace_compose_port_mapping() {
   fi
 
   while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" =~ ^[[:space:]]*-[[:space:]]*.*\$\{ ]] && variable_mapping_detected=true
     if [[ "$line" =~ $mapping_regex ]]; then
       ((match_count += 1))
       if [[ "$current_host_ip" == "0.0.0.0" ]]; then
@@ -2375,7 +2376,12 @@ replace_compose_port_mapping() {
 
   if (( match_count != 1 )); then
     rm -f -- "$temp_file"
-    warn "未能在 Compose 文件中唯一识别当前端口映射，未自动修改。"
+    if [[ "$variable_mapping_detected" == true ]]; then
+      warn "Compose 端口映射由环境变量管理，CaddyCtl 无法安全判断变量来源，未自动修改。"
+      info "请使用应用自身的管理工具，或修改对应 env 文件后重建容器。"
+    else
+      warn "未能在 Compose 文件中唯一识别当前端口映射，未自动修改。"
+    fi
     return 1
   fi
   chmod --reference="$config_path" "$temp_file" || {
@@ -2383,6 +2389,32 @@ replace_compose_port_mapping() {
     return 1
   }
   mv -- "$temp_file" "$config_path"
+}
+
+is_kopiactl_web_ui_container() {
+  local container_name="$1"
+
+  [[ "$container_name" == kopia-web-ui ]] || return 1
+  [[ -x /usr/local/bin/kopiactl ]] || return 1
+  [[ -f /opt/kopiactl/kopiactl.env ]] || return 1
+  grep -qx 'INSTALL_MODE=docker' /opt/kopiactl/kopiactl.env 2>/dev/null
+}
+
+apply_kopiactl_web_ui_bind_address() {
+  local bind_host="$1"
+  local host_port="$2"
+  local internal_port="$3"
+
+  info "检测到 KopiaCtl 管理的 Web UI，交由 KopiaCtl 修改发布范围并重建容器。"
+  /usr/local/bin/kopiactl web-ui set-bind "$bind_host" || {
+    error 'KopiaCtl 未能修改 Web UI 发布范围。请先将 KopiaCtl 更新到支持该命令的版本。'
+    return 1
+  }
+  if ! wait_for_docker_port_mapping "$host_port" "$bind_host" "${internal_port}/tcp"; then
+    error 'KopiaCtl 命令已执行，但未检测到预期端口映射。请查看 KopiaCtl 的 Web UI 状态。'
+    return 1
+  fi
+  success "KopiaCtl Web UI 已改为 ${bind_host}:${host_port}:${internal_port}。"
 }
 
 wait_for_docker_port_mapping() {
@@ -2651,6 +2683,21 @@ show_docker_mapping_plan() {
     0) return 0 ;;
     *) error "无效选项：$mode"; return 1 ;;
   esac
+
+  if is_kopiactl_web_ui_container "$container_name"; then
+    if [[ "$current_host_ip" == "$bind_host" ]]; then
+      info "当前 KopiaCtl Web UI 端口映射已是目标地址，无需修改。"
+      return 0
+    fi
+    read -r -p "交由 KopiaCtl 修改 Web UI 发布范围并重建容器？[y/N，回车默认 N]：" auto_apply_answer
+    auto_apply_answer="${auto_apply_answer:-N}"
+    case "$auto_apply_answer" in
+      Y|y) apply_kopiactl_web_ui_bind_address "$bind_host" "$host_port" "$internal_port" ;;
+      N|n) info "未自动修改。可在 KopiaCtl 的“修改 Web UI 发布范围”中设置为 ${bind_host}。" ;;
+      *) error "请输入 Y 或 n。"; return 1 ;;
+    esac
+    return
+  fi
 
   printf '\n请将 Compose 中对应服务的 ports 映射改为：\n\n'
   printf 'services:\n  %s:\n    ports:\n      - "%s:%s:%s"\n' \

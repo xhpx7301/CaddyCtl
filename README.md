@@ -151,7 +151,7 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | `0` 返回 | 不进行变更并返回上一级。 |
 
 > Docker 不能为已创建的容器原地增加端口映射。对于已识别的单文件 Compose 项目，
-> 向导可在确认后备份、修改、校验并重建服务；无法安全识别的 Compose 配置只会给出手工片段。
+> 向导可在确认后备份、修改、校验并重建服务；无法安全识别的 Compose 配置只会给出手工片段。若端口映射使用 `${VARIABLE}`，CaddyCtl 不会猜测变量来源，而会提示使用应用自身工具或修改对应 env 文件。对由 KopiaCtl 管理的 `kopia-web-ui`，选项 `3` 和 `4` 会在确认后调用 KopiaCtl 的发布范围命令，由 KopiaCtl 负责配置、重建与共享网络恢复。
 
 ## Docker 后端建议
 
