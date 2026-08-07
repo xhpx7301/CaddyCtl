@@ -1431,6 +1431,12 @@ is_npm_container() {
   local image="${1,,}"
   local container_name="${2,,}"
 
+  # Monitoring/sidecar containers often reuse the NPM name prefix but are not
+  # the proxy manager that should receive gateway traffic.
+  case "$image:$container_name" in
+    *monitor*|*metrics*|*exporter*) return 1 ;;
+  esac
+
   case "$image" in
     *nginx*proxy*manager*|jc21/*) return 0 ;;
   esac
