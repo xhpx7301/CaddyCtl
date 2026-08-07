@@ -2748,7 +2748,7 @@ show_docker_mapping_plan() {
   local current_host_ip="$4"
   local host_port="$5"
   local mode bind_host internal_port project service workdir config_files auto_apply_answer
-  local compat_target compat_container_id compat_container_name compat_network compat_gateway compat_gateway_display manual_container selection i
+  local compat_target compat_container_id compat_container_name compat_network compat_gateway compat_gateway_display manual_container selection i preferred_index
   local -a compat_targets
 
   internal_port="${container_port%/tcp}"
@@ -2764,7 +2764,7 @@ show_docker_mapping_plan() {
   elif (( ${#compat_targets[@]} > 1 )); then
     compat_target="$(preferred_npm_gateway_target "${compat_targets[@]}")"
     IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
-    compat_gateway_display="$compat_gateway"
+    compat_gateway_display="$compat_gateway（默认；检测到 ${#compat_targets[@]} 个网关）"
   fi
 
   printf '\n%sDocker 容器访问与端口发布%s\n' "$BOLD" "$RESET"
@@ -2803,21 +2803,26 @@ show_docker_mapping_plan() {
       if (( ${#compat_targets[@]} == 1 )); then
         compat_target="${compat_targets[0]}"
       else
+        preferred_index=1
         compat_target="$(preferred_npm_gateway_target "${compat_targets[@]}")"
         IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
-        if [[ "$compat_network" != "npmctl_default" && "$compat_network" != "bridge" ]]; then
-          printf '\n检测到多个 NPM Docker 网络网关：\n'
-          for ((i = 0; i < ${#compat_targets[@]}; i++)); do
-            IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[$i]}"
+        printf '\n检测到多个 NPM Docker 网络网关（回车使用推荐项）：\n'
+        for ((i = 0; i < ${#compat_targets[@]}; i++)); do
+          IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[$i]}"
+          if [[ "$compat_targets[$i]" == "$compat_target" ]]; then
+            preferred_index=$((i + 1))
+            printf '  %d. 容器 %s，网络 %s，网关 %s [推荐]\n' "$((i + 1))" "$compat_container_name" "$compat_network" "$compat_gateway"
+          else
             printf '  %d. 容器 %s，网络 %s，网关 %s\n' "$((i + 1))" "$compat_container_name" "$compat_network" "$compat_gateway"
-          done
-          read -r -p "请选择 [1-${#compat_targets[@]}]: " selection
-          if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#compat_targets[@]} )); then
-            error "无效选项：$selection"
-            return 1
           fi
-          compat_target="${compat_targets[$((selection - 1))]}"
+        done
+        read -r -p "请选择 [1-${#compat_targets[@]}，默认 ${preferred_index}]: " selection
+        selection="${selection:-$preferred_index}"
+        if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#compat_targets[@]} )); then
+          error "无效选项：$selection"
+          return 1
         fi
+        compat_target="${compat_targets[$((selection - 1))]}"
       fi
       IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
       if ! is_local_upstream_host "$compat_gateway"; then
