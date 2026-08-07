@@ -1074,8 +1074,17 @@ is_local_upstream_host() {
     localhost|127.0.0.1|::1) return 0 ;;
   esac
 
-  command -v ip >/dev/null 2>&1 || return 1
-  ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$host"
+  if command -v ip >/dev/null 2>&1 \
+      && ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -Fxq "$host"; then
+    return 0
+  fi
+
+  # Docker bridge gateways are host-side addresses, but some Docker/runtime
+  # combinations do not expose the bridge interface through `ip addr`.
+  command -v docker >/dev/null 2>&1 || return 1
+  docker network ls -q 2>/dev/null | while read -r network_id; do
+    docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' "$network_id" 2>/dev/null
+  done | awk 'NF' | grep -Fxq "$host"
 }
 
 local_tcp_listener_details() {
@@ -1562,6 +1571,30 @@ find_npm_gateway_targets() {
     is_npm_container "$image" "$container_name" || continue
     docker_gateway_targets_for_container "$container_id"
   done < <(docker ps --format '{{.ID}}|{{.Image}}|{{.Names}}' 2>/dev/null)
+}
+
+preferred_npm_gateway_target() {
+  local target container_id container_name network gateway
+  local -a targets=("$@")
+
+  (( ${#targets[@]} > 0 )) || return 1
+  # NPMCtl creates npmctl_default. Prefer it when NPM is attached to several
+  # bridge networks, then fall back to Docker's default bridge.
+  for target in "${targets[@]}"; do
+    IFS=$'\t' read -r container_id container_name network gateway <<< "$target"
+    if [[ "$network" == npmctl_default ]]; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done
+  for target in "${targets[@]}"; do
+    IFS=$'\t' read -r container_id container_name network gateway <<< "$target"
+    if [[ "$network" == bridge ]]; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done
+  printf '%s\n' "${targets[0]}"
 }
 
 verify_npm_gateway_connection() {
@@ -2729,13 +2762,9 @@ show_docker_mapping_plan() {
     IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[0]}"
     compat_gateway_display="$compat_gateway"
   elif (( ${#compat_targets[@]} > 1 )); then
-    for compat_target in "${compat_targets[@]}"; do
-      IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
-      if [[ "$compat_network" == "bridge" ]]; then
-        compat_gateway_display="$compat_gateway"
-        break
-      fi
-    done
+    compat_target="$(preferred_npm_gateway_target "${compat_targets[@]}")"
+    IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
+    compat_gateway_display="$compat_gateway"
   fi
 
   printf '\n%sDocker 容器访问与端口发布%s\n' "$BOLD" "$RESET"
@@ -2774,14 +2803,9 @@ show_docker_mapping_plan() {
       if (( ${#compat_targets[@]} == 1 )); then
         compat_target="${compat_targets[0]}"
       else
-        # Prefer Docker's default bridge when NPM is attached to several networks.
-        for compat_target in "${compat_targets[@]}"; do
-          IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
-          if [[ "$compat_network" == "bridge" ]]; then
-            break
-          fi
-        done
-        if [[ "$compat_network" != "bridge" ]]; then
+        compat_target="$(preferred_npm_gateway_target "${compat_targets[@]}")"
+        IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
+        if [[ "$compat_network" != "npmctl_default" && "$compat_network" != "bridge" ]]; then
           printf '\n检测到多个 NPM Docker 网络网关：\n'
           for ((i = 0; i < ${#compat_targets[@]}; i++)); do
             IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[$i]}"
