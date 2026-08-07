@@ -72,8 +72,10 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | 命令或选项 | 作用 |
 | --- | --- |
 | `caddyctl` | 以交互式菜单运行管理工具。 |
+| `pl` | 直接打开本机服务端口监听助手，不必进入主菜单。 |
+| `caddyctl listen` | `pl` 的等价快捷写法。 |
 | `caddyctl --install` | 直接安装 Caddy，然后打开管理菜单。 |
-| `caddyctl --install-manager` | 安装 `caddyctl` 命令入口，然后打开管理菜单。主要供安装器调用。 |
+| `caddyctl --install-manager` | 安装 `caddyctl` 和 `pl` 命令入口，然后打开管理菜单。主要供安装器调用。 |
 | `caddyctl --help` / `caddyctl -h` | 显示简要命令帮助。 |
 | `caddy version` | 调用官方 Caddy CLI 查看版本；CaddyCtl 不会覆盖该命令。 |
 | `caddy validate --config /etc/caddy/Caddyfile` | 使用官方 Caddy CLI 校验主配置。 |
@@ -145,7 +147,7 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | 选项 | 作用 |
 | --- | --- |
 | `1` 推荐：NPM 容器直连应用容器 | 将 NPM 与应用接入共享 Docker 网络，不公开应用端口；NPM 使用 `Compose 服务名:容器内部端口`。 |
-| `2` 兼容：经宿主机中转 | NPM 通过 Docker 网关访问宿主机公开端口；要求端口绑定到 `0.0.0.0`，并应限制防火墙规则。 |
+| `2` 兼容：经宿主机中转 | 自动检测 NPM 所在 Docker bridge 网关，并将映射改为 `网关地址:宿主机端口:容器端口`；确认后备份、校验并重建 Compose 服务。 |
 | `3` 宿主机 Caddy | 将映射改为 `127.0.0.1:宿主机端口:容器端口`，仅供宿主机上的 Caddy 使用。可与共享网络方案并存。 |
 | `4` 公网访问 | 将映射改为 `0.0.0.0:宿主机端口:容器端口`，允许任意来源访问，须自行配置防火墙。 |
 | `0` 返回 | 不进行变更并返回上一级。 |

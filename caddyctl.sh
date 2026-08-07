@@ -18,6 +18,8 @@ readonly BACKUP_DIR="/var/backups/caddyctl"
 readonly MANAGER_DIR="/usr/local/lib/caddyctl"
 readonly MANAGER_SCRIPT="${MANAGER_DIR}/caddyctl.sh"
 readonly MANAGER_COMMAND="/usr/local/bin/caddyctl"
+readonly LISTENER_COMMAND="/usr/local/bin/pl"
+readonly LEGACY_LISTENER_COMMAND="/usr/local/bin/caddyctl-listen"
 readonly LEGACY_MANAGER_COMMAND="/usr/local/bin/caddy"
 readonly IMPORT_BEGIN="# BEGIN CADDYCTL SITES"
 readonly IMPORT_END="# END CADDYCTL SITES"
@@ -59,7 +61,8 @@ manager_source() {
 
 show_command_usage() {
   printf '%s\n' "$PROJECT_NAME 是 Caddy 的管理菜单。"
-  printf '%s\n' "用法：caddyctl [--install]"
+  printf '%s\n' "用法：caddyctl [listen|--listen|--install]"
+  printf '%s\n' "  listen/--listen  直接打开本机服务端口监听助手"
   printf '%s\n' "  --install  直接安装 Caddy 并打开管理菜单"
   printf '%s\n' "官方 Caddy CLI 保持不变，例如：caddy version"
 }
@@ -134,6 +137,12 @@ install_manager_command() {
   rm -f -- "$MANAGER_COMMAND"
   migrate_legacy_manager_command
 
+  if [[ -f "$LEGACY_LISTENER_COMMAND" ]] \
+      && grep -Fq '# CaddyCtl listener shortcut' "$LEGACY_LISTENER_COMMAND" 2>/dev/null; then
+    backup_file "$LEGACY_LISTENER_COMMAND" "caddyctl-listen-command-before-rename"
+    rm -f -- "$LEGACY_LISTENER_COMMAND"
+  fi
+
   cat >"$MANAGER_COMMAND" <<'WRAPPER'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -141,8 +150,8 @@ set -uo pipefail
 # CaddyCtl command wrapper
 readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
 
-if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--install" ) ]]; then
-  printf 'caddyctl 仅支持无参数或 --install。官方 CLI 请使用 caddy。\n' >&2
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--install" && "$1" != "listen" ) ]]; then
+  printf 'caddyctl 仅支持无参数、listen 或 --install。官方 CLI 请使用 caddy。\n' >&2
   exit 2
 fi
 
@@ -156,8 +165,39 @@ if ! command -v sudo >/dev/null 2>&1; then
 fi
 
 exec sudo "$MANAGER_SCRIPT" "$@"
-WRAPPER
+  WRAPPER
   chmod 0755 "$MANAGER_COMMAND"
+
+  if [[ -e "$LISTENER_COMMAND" ]] \
+      && ! grep -Fq '# CaddyCtl listener shortcut' "$LISTENER_COMMAND" 2>/dev/null; then
+    warn "$LISTENER_COMMAND 已存在，将先备份再安装端口助手快捷命令。"
+    backup_file "$LISTENER_COMMAND" "pl-command"
+  fi
+  rm -f -- "$LISTENER_COMMAND"
+  cat >"$LISTENER_COMMAND" <<'WRAPPER'
+#!/usr/bin/env bash
+set -uo pipefail
+
+# CaddyCtl listener shortcut
+readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
+
+if [[ $# -ne 0 ]]; then
+  printf 'pl 不接受参数；直接运行即可打开本机服务端口监听助手。\n' >&2
+  exit 2
+fi
+
+if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+  exec "$MANAGER_SCRIPT" --listen
+fi
+
+if ! command -v sudo >/dev/null 2>&1; then
+  printf '打开端口监听助手需要 root 权限，但系统未安装 sudo。\n' >&2
+  exit 1
+fi
+
+exec sudo "$MANAGER_SCRIPT" --listen
+WRAPPER
+  chmod 0755 "$LISTENER_COMMAND"
 }
 
 cache_busted_github_raw_url() {
@@ -491,7 +531,12 @@ uninstall_caddy() {
 remove_manager_files() {
   backup_file "$MANAGER_SCRIPT" "caddyctl-before-uninstall"
   backup_file "$MANAGER_COMMAND" "caddyctl-command-before-uninstall"
-  rm -f -- "$MANAGER_COMMAND" "$MANAGER_SCRIPT"
+  backup_file "$LISTENER_COMMAND" "pl-command-before-uninstall"
+  if [[ -f "$LEGACY_LISTENER_COMMAND" ]] \
+      && grep -Fq '# CaddyCtl listener shortcut' "$LEGACY_LISTENER_COMMAND" 2>/dev/null; then
+    backup_file "$LEGACY_LISTENER_COMMAND" "caddyctl-listen-command-before-uninstall"
+  fi
+  rm -f -- "$MANAGER_COMMAND" "$LISTENER_COMMAND" "$LEGACY_LISTENER_COMMAND" "$MANAGER_SCRIPT"
   rmdir -- "$MANAGER_DIR" 2>/dev/null || true
 }
 
@@ -2638,12 +2683,28 @@ show_docker_mapping_plan() {
   local current_host_ip="$4"
   local host_port="$5"
   local mode bind_host internal_port project service workdir config_files auto_apply_answer
+  local compat_target compat_container_id compat_container_name compat_network compat_gateway compat_gateway_display manual_container selection i
+  local -a compat_targets
 
   internal_port="${container_port%/tcp}"
   project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container_id" 2>/dev/null || true)"
   service="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container_id" 2>/dev/null || true)"
   workdir="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$container_id" 2>/dev/null || true)"
   config_files="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$container_id" 2>/dev/null || true)"
+  mapfile -t compat_targets < <(find_npm_gateway_targets)
+  compat_gateway_display="<选择后确定>"
+  if (( ${#compat_targets[@]} == 1 )); then
+    IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[0]}"
+    compat_gateway_display="$compat_gateway"
+  elif (( ${#compat_targets[@]} > 1 )); then
+    for compat_target in "${compat_targets[@]}"; do
+      IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
+      if [[ "$compat_network" == "bridge" ]]; then
+        compat_gateway_display="$compat_gateway"
+        break
+      fi
+    done
+  fi
 
   printf '\n%sDocker 容器端口映射%s\n' "$BOLD" "$RESET"
   if [[ -n "$project" ]]; then
@@ -2654,7 +2715,7 @@ show_docker_mapping_plan() {
   printf '容器：%s\n宿主机发布地址：%s:%s（docker-proxy）\n容器内部端口：%s（共享网络/NPM 直连使用）\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
   printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
-  printf '  2. [兼容] NPM 经宿主机中转：172.17.0.1:%s（需发布 0.0.0.0）\n' "$host_port"
+  printf '  2. [兼容] NPM 经 Docker bridge 网关中转：%s:%s:%s（仅发布到该网关）\n' "$compat_gateway_display" "$host_port" "$internal_port"
   printf '  3. [宿主机 Caddy] 发布端口改为：127.0.0.1:%s:%s（不改容器内部端口；可与选项 1 共用）\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
@@ -2666,9 +2727,50 @@ show_docker_mapping_plan() {
       return
       ;;
     2)
-      bind_host="0.0.0.0"
-      warn "兼容方案会将端口发布到所有 IPv4 网卡。请限制防火墙来源，仅让 NPM 所在 Docker 网段访问。"
-      info "重建容器后，在 NPM 中填写 Docker 网关地址:${host_port}；共享网络方案更安全且无需发布端口。"
+      if (( ${#compat_targets[@]} == 0 )); then
+        warn "未自动检测到带 IPv4 Docker bridge 网关的 NPM 容器。"
+        show_running_docker_containers
+        read -r -p "输入 NPM 容器名称或 ID（直接回车返回）: " manual_container
+        [[ -n "$manual_container" ]] || return 0
+        mapfile -t compat_targets < <(docker_gateway_targets_for_container "$manual_container")
+      fi
+      if (( ${#compat_targets[@]} == 0 )); then
+        error "未找到 NPM 容器的 IPv4 Docker bridge 网关，无法生成兼容映射。"
+        return 1
+      fi
+      if (( ${#compat_targets[@]} == 1 )); then
+        compat_target="${compat_targets[0]}"
+      else
+        # Prefer Docker's default bridge when NPM is attached to several networks.
+        for compat_target in "${compat_targets[@]}"; do
+          IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
+          if [[ "$compat_network" == "bridge" ]]; then
+            break
+          fi
+        done
+        if [[ "$compat_network" != "bridge" ]]; then
+          printf '\n检测到多个 NPM Docker 网络网关：\n'
+          for ((i = 0; i < ${#compat_targets[@]}; i++)); do
+            IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "${compat_targets[$i]}"
+            printf '  %d. 容器 %s，网络 %s，网关 %s\n' "$((i + 1))" "$compat_container_name" "$compat_network" "$compat_gateway"
+          done
+          read -r -p "请选择 [1-${#compat_targets[@]}]: " selection
+          if [[ ! "$selection" =~ ^[0-9]+$ ]] || (( selection < 1 || selection > ${#compat_targets[@]} )); then
+            error "无效选项：$selection"
+            return 1
+          fi
+          compat_target="${compat_targets[$((selection - 1))]}"
+        fi
+      fi
+      IFS=$'\t' read -r compat_container_id compat_container_name compat_network compat_gateway <<< "$compat_target"
+      if ! is_local_upstream_host "$compat_gateway"; then
+        error "检测到的 Docker 网关 ${compat_gateway} 不是本机地址，无法作为端口发布地址。"
+        return 1
+      fi
+      bind_host="$compat_gateway"
+      info "检测到 NPM 容器 ${compat_container_name} 的 Docker 网关：${compat_gateway}（网络 ${compat_network}）。"
+      info "Compose 目标映射：${compat_gateway}:${host_port}:${internal_port}。"
+      info "重建后在 NPM 中填写上游地址 ${compat_gateway}:${host_port}。"
       ;;
     3)
       bind_host="127.0.0.1"
@@ -3046,6 +3148,12 @@ main_menu() {
 if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
   show_command_usage
   exit 0
+fi
+
+if [[ $# -eq 1 && ( "$1" == "--listen" || "$1" == "listen" ) ]]; then
+  require_root "$@"
+  local_service_listener_assistant
+  exit $?
 fi
 
 if [[ $# -eq 1 && "$1" == "--install" ]]; then
