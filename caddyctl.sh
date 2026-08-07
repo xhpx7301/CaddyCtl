@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.41"
+readonly MANAGER_VERSION="3.3.42"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -200,6 +200,24 @@ WRAPPER
   chmod 0755 "$LISTENER_COMMAND"
 }
 
+ensure_manager_commands() {
+  local source_path
+
+  source_path="$(manager_source)"
+  [[ "$source_path" == "$MANAGER_SCRIPT" ]] || return 0
+  if [[ -x "$MANAGER_COMMAND" ]] \
+      && grep -Fq '# CaddyCtl command wrapper' "$MANAGER_COMMAND" 2>/dev/null \
+      && grep -Fq '"$1" != "listen"' "$MANAGER_COMMAND" 2>/dev/null \
+      && [[ -x "$LISTENER_COMMAND" ]] \
+      && grep -Fq '# CaddyCtl listener shortcut' "$LISTENER_COMMAND" 2>/dev/null; then
+    return 0
+  fi
+
+  info "正在同步 CaddyCtl 命令入口与 pl 快捷命令..."
+  install_manager_command
+  success "命令入口已同步；可直接输入 pl 打开本机服务端口监听助手。"
+}
+
 cache_busted_github_raw_url() {
   local source_url="$1"
   local separator
@@ -311,6 +329,7 @@ update_manager() {
   fi
   if [[ -f "$MANAGER_SCRIPT" ]] && cmp -s "$temp_file" "$MANAGER_SCRIPT"; then
     rm -f -- "$temp_file"
+    ensure_manager_commands
     success "CaddyCtl 已是最新版本（$current_version）。"
     return 0
   fi
@@ -2673,7 +2692,7 @@ show_npm_shared_network_guide() {
   printf 'networks:\n  %s:\n    external: true\n\n' "$shared_network"
   info "以上片段用于持久化：分别保存后在两个 Compose 项目目录执行 docker compose up -d。"
   info "手工连接成功时可立即使用 ${upstream_name}:${internal_port}；重建容器后必须依靠上述 Compose 配置恢复连接。"
-  warn "确认 NPM 访问正常后，才移除应用现有 ports 映射；菜单不会自动修改 Compose 或重建容器。"
+  warn "本向导不会修改当前 ports。确认共享网络已持久化且 NPM 访问正常后，可自行移除不再需要的端口映射并重建应用容器。"
 }
 
 show_docker_mapping_plan() {
@@ -2706,7 +2725,7 @@ show_docker_mapping_plan() {
     done
   fi
 
-  printf '\n%sDocker 容器端口映射%s\n' "$BOLD" "$RESET"
+  printf '\n%sDocker 容器访问与端口发布%s\n' "$BOLD" "$RESET"
   if [[ -n "$project" ]]; then
     printf '启动方式：Docker 容器（Compose 管理）\n'
   else
@@ -2714,9 +2733,10 @@ show_docker_mapping_plan() {
   fi
   printf '容器：%s\n宿主机发布地址：%s:%s（docker-proxy）\n容器内部端口：%s（共享网络/NPM 直连使用）\n' \
     "$container_name" "${current_host_ip:-0.0.0.0}" "$host_port" "$container_port"
-  printf '  1. [推荐] NPM 容器直连应用容器（共享网络，不开放端口）\n'
+  info "选项 1 只配置共享网络并保留当前 ports；选项 2-4 才会修改端口发布地址。"
+  printf '  1. [推荐] 配置 NPM 与应用共享网络（不修改当前端口映射）\n'
   printf '  2. [兼容] NPM 经 Docker bridge 网关中转：%s:%s:%s（仅发布到该网关）\n' "$compat_gateway_display" "$host_port" "$internal_port"
-  printf '  3. [宿主机 Caddy] 发布端口改为：127.0.0.1:%s:%s（不改容器内部端口；可与选项 1 共用）\n' "$host_port" "$internal_port"
+  printf '  3. [宿主机 Caddy] 仅发布到本机：127.0.0.1:%s:%s\n' "$host_port" "$internal_port"
   printf '  4. [公网] 任何来源可访问：0.0.0.0:%s:%s\n' "$host_port" "$internal_port"
   printf '  0. 返回\n'
   read -r -p "请选择 [0-4]：" mode
@@ -2776,7 +2796,6 @@ show_docker_mapping_plan() {
       bind_host="127.0.0.1"
       info "仅修改宿主机发布地址为 127.0.0.1:${host_port}；容器内部端口仍为 ${internal_port}。"
       info "此端口供宿主机上的 Caddy、Nginx 等反代；Docker 内的 NPM 不能经 127.0.0.1:${host_port} 访问。"
-      info "若已选择选项 1 共享网络，NPM 仍可使用 ${service:-应用服务名}:${internal_port} 直连应用。"
       ;;
     4)
       bind_host="0.0.0.0"
@@ -3177,4 +3196,5 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 require_root "$@"
+ensure_manager_commands
 main_menu
