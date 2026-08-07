@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.43"
+readonly MANAGER_VERSION="3.3.44"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -149,6 +149,15 @@ set -uo pipefail
 
 # CaddyCtl command wrapper
 readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
+readonly COMMAND_NAME="${0##*/}"
+
+if [[ "$COMMAND_NAME" == "pl" ]]; then
+  if [[ $# -ne 0 ]]; then
+    printf 'pl 不接受参数；直接运行即可打开本机服务端口监听助手。\n' >&2
+    exit 2
+  fi
+  set -- listen
+fi
 
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--install" && "$1" != "listen" ) ]]; then
   printf 'caddyctl 仅支持无参数、listen 或 --install。官方 CLI 请使用 caddy。\n' >&2
@@ -165,7 +174,7 @@ if ! command -v sudo >/dev/null 2>&1; then
 fi
 
 exec sudo "$MANAGER_SCRIPT" "$@"
-  WRAPPER
+WRAPPER
   chmod 0755 "$MANAGER_COMMAND" || {
     error "无法设置 $MANAGER_COMMAND 的可执行权限。"
     return 1
@@ -175,41 +184,18 @@ exec sudo "$MANAGER_SCRIPT" "$@"
     return 1
   }
 
-  if [[ -e "$LISTENER_COMMAND" ]] \
-      && ! grep -Fq '# CaddyCtl listener shortcut' "$LISTENER_COMMAND" 2>/dev/null; then
+  if [[ ( -e "$LISTENER_COMMAND" || -L "$LISTENER_COMMAND" ) ]] \
+      && [[ ! "$LISTENER_COMMAND" -ef "$MANAGER_COMMAND" ]]; then
     warn "$LISTENER_COMMAND 已存在，将先备份再安装端口助手快捷命令。"
     backup_file "$LISTENER_COMMAND" "pl-command"
   fi
   rm -f -- "$LISTENER_COMMAND"
-  cat >"$LISTENER_COMMAND" <<'WRAPPER'
-#!/usr/bin/env bash
-set -uo pipefail
-
-# CaddyCtl listener shortcut
-readonly MANAGER_SCRIPT="/usr/local/lib/caddyctl/caddyctl.sh"
-
-if [[ $# -ne 0 ]]; then
-  printf 'pl 不接受参数；直接运行即可打开本机服务端口监听助手。\n' >&2
-  exit 2
-fi
-
-if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-  exec "$MANAGER_SCRIPT" --listen
-fi
-
-if ! command -v sudo >/dev/null 2>&1; then
-  printf '打开端口监听助手需要 root 权限，但系统未安装 sudo。\n' >&2
-  exit 1
-fi
-
-exec sudo "$MANAGER_SCRIPT" --listen
-WRAPPER
-  chmod 0755 "$LISTENER_COMMAND" || {
-    error "无法设置 $LISTENER_COMMAND 的可执行权限。"
+  ln -s "$MANAGER_COMMAND" "$LISTENER_COMMAND" || {
+    error "无法创建快捷命令 $LISTENER_COMMAND。"
     return 1
   }
-  [[ -x "$LISTENER_COMMAND" ]] || {
-    error "$LISTENER_COMMAND 仍不可执行，请检查 /usr/local/bin 的挂载和权限。"
+  [[ -x "$LISTENER_COMMAND" && "$LISTENER_COMMAND" -ef "$MANAGER_COMMAND" ]] || {
+    error "$LISTENER_COMMAND 未正确指向 $MANAGER_COMMAND。"
     return 1
   }
 }
@@ -223,7 +209,7 @@ ensure_manager_commands() {
       && grep -Fq '# CaddyCtl command wrapper' "$MANAGER_COMMAND" 2>/dev/null \
       && grep -Fq '"$1" != "listen"' "$MANAGER_COMMAND" 2>/dev/null \
       && [[ -x "$LISTENER_COMMAND" ]] \
-      && grep -Fq '# CaddyCtl listener shortcut' "$LISTENER_COMMAND" 2>/dev/null; then
+      && [[ "$LISTENER_COMMAND" -ef "$MANAGER_COMMAND" ]]; then
     return 0
   fi
 
