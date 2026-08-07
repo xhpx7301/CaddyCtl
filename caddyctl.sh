@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.42"
+readonly MANAGER_VERSION="3.3.43"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -166,7 +166,14 @@ fi
 
 exec sudo "$MANAGER_SCRIPT" "$@"
   WRAPPER
-  chmod 0755 "$MANAGER_COMMAND"
+  chmod 0755 "$MANAGER_COMMAND" || {
+    error "无法设置 $MANAGER_COMMAND 的可执行权限。"
+    return 1
+  }
+  [[ -x "$MANAGER_COMMAND" ]] || {
+    error "$MANAGER_COMMAND 仍不可执行，请检查 /usr/local/bin 的挂载和权限。"
+    return 1
+  }
 
   if [[ -e "$LISTENER_COMMAND" ]] \
       && ! grep -Fq '# CaddyCtl listener shortcut' "$LISTENER_COMMAND" 2>/dev/null; then
@@ -197,7 +204,14 @@ fi
 
 exec sudo "$MANAGER_SCRIPT" --listen
 WRAPPER
-  chmod 0755 "$LISTENER_COMMAND"
+  chmod 0755 "$LISTENER_COMMAND" || {
+    error "无法设置 $LISTENER_COMMAND 的可执行权限。"
+    return 1
+  }
+  [[ -x "$LISTENER_COMMAND" ]] || {
+    error "$LISTENER_COMMAND 仍不可执行，请检查 /usr/local/bin 的挂载和权限。"
+    return 1
+  }
 }
 
 ensure_manager_commands() {
@@ -214,7 +228,10 @@ ensure_manager_commands() {
   fi
 
   info "正在同步 CaddyCtl 命令入口与 pl 快捷命令..."
-  install_manager_command
+  if ! install_manager_command; then
+    error "命令入口同步失败；未继续进入管理菜单。"
+    return 1
+  fi
   success "命令入口已同步；可直接输入 pl 打开本机服务端口监听助手。"
 }
 
@@ -444,7 +461,7 @@ install_caddy() {
   fi
 
   initialize_caddyfile
-  install_manager_command
+  install_manager_command || return 1
 
   if ! "$REAL_CADDY" validate --config "$CADDYFILE" --adapter caddyfile; then
     error "现有 Caddyfile 校验失败，未启动服务。请先修正配置。"
@@ -491,7 +508,7 @@ update_caddy() {
     return 1
   fi
 
-  install_manager_command
+  install_manager_command || return 1
   systemctl restart caddy || {
     error "更新完成，但服务重启失败。请查看日志。"
     return 1
@@ -3184,7 +3201,7 @@ fi
 
 if [[ $# -eq 1 && "$1" == "--install-manager" ]]; then
   require_root "$@"
-  install_manager_command
+  install_manager_command || exit $?
   success "CaddyCtl 管理菜单已安装。请在菜单中选择“安装或更新 Caddy”继续。"
   info "以后可在终端直接输入 caddyctl 打开管理菜单。"
   main_menu
@@ -3196,5 +3213,5 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 require_root "$@"
-ensure_manager_commands
+ensure_manager_commands || exit $?
 main_menu
