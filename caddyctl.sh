@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.44"
+readonly MANAGER_VERSION="3.3.45"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1204,7 +1204,7 @@ docker_published_listener_services() {
   docker info >/dev/null 2>&1 || return 0
   while IFS= read -r container_id; do
     [[ -n "$container_id" ]] || continue
-    docker inspect --format '{{range $containerPort, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s\t%s\t" .HostIp .HostPort}}{{with index $.Config.Labels "com.docker.compose.service"}}{{.}}{{else}}{{$.Name}}{{end}}{{println}}{{end}}{{end}}' "$container_id" 2>/dev/null
+    docker inspect --format '{{range $containerPort, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{printf "%s\t%s\t%s\t" .HostIp .HostPort $containerPort}}{{with index $.Config.Labels "com.docker.compose.service"}}{{.}}{{else}}{{$.Name}}{{end}}{{println}}{{end}}{{end}}' "$container_id" 2>/dev/null
   done < <(docker ps -q 2>/dev/null)
 }
 
@@ -1251,7 +1251,7 @@ format_listener_table() {
       print_header_field("接收队列", 8, width[2])
       print_header_field("发送队列", 8, width[3])
       print_header_field("本地监听地址:端口", 17, width[4])
-      print_header_field("对端地址:端口", 13, width[5])
+      print_header_field("服务实际端口", 12, width[5])
       if (listener_command == "netstat") {
         print_header_field("状态", 4, width[6])
         print_header_field("服务名称", 8, width[7])
@@ -1265,7 +1265,7 @@ format_listener_table() {
       width[2] = 8
       width[3] = 8
       width[4] = 18
-      width[5] = 17
+      width[5] = 14
       width[6] = 7
       width[7] = 12
       if (listener_command != "netstat") {
@@ -1274,13 +1274,15 @@ format_listener_table() {
       mapping_count = split(docker_services, mappings, "\n")
       for (i = 1; i <= mapping_count; i++) {
         field_count = split(mappings[i], fields, "\t")
-        if (field_count < 3 || fields[1] == "" || fields[2] == "" || fields[3] == "") {
+        if (field_count < 4 || fields[1] == "" || fields[2] == "" || fields[3] == "" || fields[4] == "") {
           continue
         }
-        sub(/^\/+/, "", fields[3])
+        sub(/^\/+/, "", fields[4])
         host = normalized_host(fields[1])
-        add_service(by_binding, host SUBSEP fields[2], fields[3])
-        add_service(by_port, fields[2], fields[3])
+        add_service(service_by_binding, host SUBSEP fields[2], fields[4])
+        add_service(service_by_port, fields[2], fields[4])
+        add_service(actual_port_by_binding, host SUBSEP fields[2], fields[3])
+        add_service(actual_port_by_port, fields[2], fields[3])
       }
     }
     listener_command == "netstat" && NR <= 2 {
@@ -1299,19 +1301,27 @@ format_listener_table() {
         process = process (process == "" ? "" : " ") $i
       }
       service = "-"
+      address = $4
+      port = address
+      sub(/^.*:/, "", port)
+      host = address
+      sub(/:[^:]*$/, "", host)
+      host = normalized_host(host)
+      actual_port = port "/tcp"
       if (process ~ /docker-proxy/) {
-        address = $4
-        port = address
-        sub(/^.*:/, "", port)
-        host = address
-        sub(/:[^:]*$/, "", host)
-        host = normalized_host(host)
-        service = by_binding[host SUBSEP port]
+        service = service_by_binding[host SUBSEP port]
         if (service == "") {
-          service = by_port[port]
+          service = service_by_port[port]
         }
         if (service == "") {
           service = "未知"
+        }
+        actual_port = actual_port_by_binding[host SUBSEP port]
+        if (actual_port == "") {
+          actual_port = actual_port_by_port[port]
+        }
+        if (actual_port == "") {
+          actual_port = "未知"
         }
       }
       row_count++
@@ -1319,7 +1329,7 @@ format_listener_table() {
       field[row_count, 2] = $2
       field[row_count, 3] = $3
       field[row_count, 4] = $4
-      field[row_count, 5] = $5
+      field[row_count, 5] = actual_port
       if (listener_command == "netstat") {
         field[row_count, 6] = $6
         field[row_count, 7] = service
@@ -1378,7 +1388,7 @@ localize_netstat_listener_header() {
 show_all_local_listeners() {
   printf '\n%s本机 TCP 服务监听地址%s\n' "$BOLD" "$RESET"
   info "127.0.0.1 表示仅本机；* 或 0.0.0.0 表示所有 IPv4；具体 IP 表示仅该网卡。"
-  info "对端地址在 LISTEN 状态通常显示 0.0.0.0:* 或 [::]:*，表示可接受的连接范围，不是 Docker 容器地址。"
+  info "服务实际端口：Docker 显示容器内部端口；systemd 和普通进程显示本地监听端口。"
   info "docker-proxy 表示宿主机发布端口；服务名称列优先显示 Compose 服务名，否则显示容器名。"
   if command -v ss >/dev/null 2>&1; then
     ss -ltnp 2>/dev/null | localize_ss_listener_header
