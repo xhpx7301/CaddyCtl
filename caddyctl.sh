@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.45"
+readonly MANAGER_VERSION="3.3.46"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -21,6 +21,8 @@ readonly MANAGER_COMMAND="/usr/local/bin/caddyctl"
 readonly LISTENER_COMMAND="/usr/local/bin/pl"
 readonly LEGACY_LISTENER_COMMAND="/usr/local/bin/caddyctl-listen"
 readonly LEGACY_MANAGER_COMMAND="/usr/local/bin/caddy"
+readonly CADDY_GITHUB_API="https://api.github.com/repos/caddyserver/caddy/releases/latest"
+readonly CADDY_GITHUB_RELEASE="https://github.com/caddyserver/caddy/releases/download"
 readonly IMPORT_BEGIN="# BEGIN CADDYCTL SITES"
 readonly IMPORT_END="# END CADDYCTL SITES"
 readonly LEGACY_IMPORT_BEGIN="# BEGIN CADDY-MANAGER SITES"
@@ -390,25 +392,128 @@ EOF
 }
 
 install_caddy_apt() {
-  apt-get update || return 1
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ca-certificates curl debian-keyring debian-archive-keyring \
-    apt-transport-https gnupg || return 1
+  local apt_ready=0
 
-  install -d -m 0755 /usr/share/keyrings
-  if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-      | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg; then
+  if apt-get update; then
+    apt_ready=1
+  else
+    warn "apt 软件源更新失败，将尝试 GitHub Release 安装 Caddy。"
+  fi
+
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      ca-certificates curl debian-keyring debian-archive-keyring \
+      apt-transport-https gnupg; then
+    warn "apt 依赖安装失败，继续尝试 GitHub Release。"
+  fi
+
+  if [[ $apt_ready -eq 1 ]] && command -v curl >/dev/null 2>&1 \
+      && command -v gpg >/dev/null 2>&1; then
+    install -d -m 0755 /usr/share/keyrings
+    if curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+        | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg; then
+      chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      if curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+          -o /etc/apt/sources.list.d/caddy-stable.list; then
+        chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+        if apt-get update \
+            && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy; then
+          return 0
+        fi
+      fi
+    fi
+    warn "Caddy 官方 apt 软件源不可用，将改用 GitHub Release。"
+  fi
+
+  disable_caddy_apt_source
+  install_caddy_github_deb
+}
+
+disable_caddy_apt_source() {
+  local source_file="/etc/apt/sources.list.d/caddy-stable.list"
+
+  if [[ -f "$source_file" ]]; then
+    mv -- "$source_file" "${source_file}.disabled"
+    warn "已停用不可用的 Caddy apt 软件源：${source_file}"
+  fi
+}
+
+caddy_github_arch() {
+  case "$(dpkg --print-architecture 2>/dev/null || true)" in
+    amd64) printf 'amd64\n' ;;
+    arm64) printf 'arm64\n' ;;
+    armhf) printf 'armv7\n' ;;
+    armel) printf 'armv6\n' ;;
+    ppc64el) printf 'ppc64le\n' ;;
+    riscv64) printf 'riscv64\n' ;;
+    s390x) printf 's390x\n' ;;
+    *)
+      error "GitHub Release 暂不提供当前 Debian 架构的 Caddy 安装包。"
+      return 1
+      ;;
+  esac
+}
+
+install_caddy_github_deb() {
+  local architecture version package_name temp_dir checksum_line
+
+  if ! command -v dpkg >/dev/null 2>&1; then
+    error "未检测到 dpkg，无法安装 GitHub 提供的 Debian 软件包。"
     return 1
   fi
-  chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-
-  if ! curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-      -o /etc/apt/sources.list.d/caddy-stable.list; then
+  if ! command -v sha512sum >/dev/null 2>&1; then
+    error "未检测到 sha512sum，无法校验 Caddy 安装包。"
     return 1
   fi
-  chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    error "需要 curl 或 wget 才能从 GitHub 下载 Caddy。"
+    return 1
+  fi
 
-  apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
+  architecture="$(caddy_github_arch)" || return 1
+  temp_dir="$(mktemp -d)" || {
+    error "无法创建 Caddy 下载临时目录。"
+    return 1
+  }
+
+  version="$(download_url_to_file "$CADDY_GITHUB_API" - 2>/dev/null \
+    | sed -n 's/.*"tag_name":[[:space:]]*"v\([^"]*\)".*/\1/p' | head -n 1)"
+  if [[ -z "$version" ]]; then
+    rm -rf -- "$temp_dir"
+    error "无法从 GitHub 获取 Caddy 最新稳定版本。"
+    return 1
+  fi
+
+  package_name="caddy_${version}_linux_${architecture}.deb"
+  info "正在从 GitHub 下载 Caddy ${version}（${architecture}）..."
+  if ! download_url_to_file \
+      "${CADDY_GITHUB_RELEASE}/v${version}/${package_name}" \
+      "${temp_dir}/${package_name}" \
+      || ! download_url_to_file \
+      "${CADDY_GITHUB_RELEASE}/v${version}/caddy_${version}_checksums.txt" \
+      "${temp_dir}/checksums.txt"; then
+    rm -rf -- "$temp_dir"
+    error "无法下载 Caddy GitHub Release。"
+    return 1
+  fi
+
+  checksum_line="$(awk -v name="$package_name" '$2 == name { print; exit }' \
+    "${temp_dir}/checksums.txt")"
+  if [[ -z "$checksum_line" ]] \
+      || ! (cd "$temp_dir" && printf '%s\n' "$checksum_line" | sha512sum -c -); then
+    rm -rf -- "$temp_dir"
+    error "Caddy 安装包 SHA-512 校验失败，已停止安装。"
+    return 1
+  fi
+
+  if ! dpkg -i "${temp_dir}/${package_name}"; then
+    if ! DEBIAN_FRONTEND=noninteractive apt-get -f install -y; then
+      rm -rf -- "$temp_dir"
+      error "Caddy 软件包安装失败，依赖修复也未成功。"
+      return 1
+    fi
+  fi
+  rm -rf -- "$temp_dir"
+  success "已从 GitHub Release 安装 Caddy ${version}。"
 }
 
 install_caddy_dnf() {
@@ -465,7 +570,7 @@ install_caddy() {
 }
 
 update_caddy() {
-  local package_manager
+  local package_manager update_succeeded=0
 
   if [[ ! -x "$REAL_CADDY" ]]; then
     warn "Caddy 尚未安装。"
@@ -478,10 +583,19 @@ update_caddy() {
 
   case "$package_manager" in
     apt)
-      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade caddy
+      if apt-get update \
+          && DEBIAN_FRONTEND=noninteractive apt-get install -y --only-upgrade caddy; then
+        update_succeeded=1
+      else
+        warn "apt 更新 Caddy 失败，将尝试从 GitHub Release 更新。"
+        disable_caddy_apt_source
+        install_caddy_github_deb && update_succeeded=1
+      fi
       ;;
     dnf)
-      dnf upgrade -y caddy
+      if dnf upgrade -y caddy; then
+        update_succeeded=1
+      fi
       ;;
     *)
       error "无法识别包管理器。"
@@ -489,7 +603,7 @@ update_caddy() {
       ;;
   esac
 
-  if [[ $? -ne 0 ]]; then
+  if [[ $update_succeeded -ne 1 ]]; then
     error "Caddy 更新失败。"
     return 1
   fi

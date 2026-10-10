@@ -54,6 +54,10 @@ chmod +x install.sh
 ./install.sh
 ```
 
+在 Debian/Ubuntu 上，CaddyCtl 默认使用 Caddy 官方 apt 软件源。若该源暂时不可用
+（例如 Cloudsmith 返回 `402 Payment Required`），脚本会自动切换到 Caddy GitHub
+Release，下载对应架构的 `.deb` 包并校验 SHA-512 后安装。后续更新也使用同样的回退流程。
+
 安装完成后，使用以下命令重新打开菜单：
 
 ```bash
