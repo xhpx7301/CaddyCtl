@@ -862,7 +862,8 @@ configure_manual_proxy() {
     return 1
   fi
 
-  read -r -p "2. 后端服务地址（Docker 通常填 127.0.0.1；其他服务填实际监听地址）：" upstream_host
+  read -r -p "2. 后端服务地址（Docker 通常填 127.0.0.1；其他服务填实际监听地址，默认 127.0.0.1）：" upstream_host
+  upstream_host="${upstream_host:-127.0.0.1}"
   upstream_host="${upstream_host#[}"
   upstream_host="${upstream_host%]}"
   if ! is_valid_upstream_host "$upstream_host"; then
@@ -1060,21 +1061,54 @@ read_proxy_settings() {
   printf '%s\t%s\t%s\n' "$upstream_scheme" "$upstream_host" "$upstream_port"
 }
 
+SITE_CHOICES=()
+SELECTED_SITE_PATH=''
+SELECTED_SITE_DOMAIN=''
+
+load_site_choices() {
+  local site
+
+  SITE_CHOICES=()
+  for site in "$SITES_DIR"/*.caddy; do
+    [[ -f "$site" ]] || continue
+    SITE_CHOICES+=("$site")
+  done
+}
+
 show_site_choices() {
   local site domain settings upstream_scheme upstream_host upstream_port
+  local index=1
 
-  for site in "$SITES_DIR"/*.caddy; do
+  load_site_choices
+  for site in "${SITE_CHOICES[@]}"; do
     domain="${site##*/}"
     domain="${domain%.caddy}"
     settings="$(read_proxy_settings "$site" || true)"
     if [[ -n "$settings" ]]; then
       IFS=$'\t' read -r upstream_scheme upstream_host upstream_port <<< "$settings"
-      printf '  - %s  ->  %s://%s:%s\n' \
-        "$domain" "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
+      printf '  %d. %s  ->  %s://%s:%s\n' \
+        "$index" "$domain" "$upstream_scheme" "$(format_upstream_host "$upstream_host")" "$upstream_port"
     else
-      printf '  - %s  ->  自定义 Caddy 配置\n' "$domain"
+      printf '  %d. %s  ->  自定义 Caddy 配置\n' "$index" "$domain"
     fi
+    ((index++))
   done
+}
+
+select_site_choice() {
+  local prompt="$1"
+  local choice
+
+  load_site_choices
+  read -r -p "$prompt" choice || return 1
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#SITE_CHOICES[@]} )); then
+    error "无效站点编号：$choice"
+    return 1
+  fi
+
+  SELECTED_SITE_PATH="${SITE_CHOICES[choice-1]}"
+  SELECTED_SITE_DOMAIN="${SELECTED_SITE_PATH##*/}"
+  SELECTED_SITE_DOMAIN="${SELECTED_SITE_DOMAIN%.caddy}"
 }
 
 edit_proxy_config() {
@@ -1092,18 +1126,9 @@ edit_proxy_config() {
 
   printf '\n可修改的站点（域名 -> 当前后端服务）：\n'
   show_site_choices
-  read -r -p "输入需要修改的完整域名：" domain
-  domain="${domain,,}"
-  if ! is_valid_domain "$domain"; then
-    error "域名格式不正确。"
-    return 1
-  fi
-
-  target="$(site_path_for_domain "$domain")"
-  if [[ ! -f "$target" ]]; then
-    error "未找到该域名的独立配置：$target"
-    return 1
-  fi
+  select_site_choice "输入需要修改的站点编号：" || return 1
+  domain="$SELECTED_SITE_DOMAIN"
+  target="$SELECTED_SITE_PATH"
   settings="$(read_proxy_settings "$target")" || {
     error "无法识别该站点的后端服务地址；仅支持本工具生成的 reverse_proxy http(s)://主机:端口 配置。"
     return 1
@@ -3102,7 +3127,7 @@ local_service_listener_assistant() {
 }
 
 delete_proxy() {
-  local domain target rollback_file
+  local domain target rollback_file answer
 
   if [[ ! -x "$REAL_CADDY" ]]; then
     error "Caddy 尚未安装。"
@@ -3116,21 +3141,18 @@ delete_proxy() {
 
   printf '\n可删除的站点（域名 -> 当前后端服务）：\n'
   show_site_choices
-  read -r -p "输入需要删除的完整域名：" domain
-  domain="${domain,,}"
+  select_site_choice "输入需要删除的站点编号：" || return 1
+  domain="$SELECTED_SITE_DOMAIN"
+  target="$SELECTED_SITE_PATH"
 
-  if ! is_valid_domain "$domain"; then
-    error "域名格式不正确。"
-    return 1
+  read -r -p "确认删除 $domain 的反向代理配置？[Y/n，回车确认]：" answer || {
+    info "已取消。"
+    return 0
+  }
+  if [[ "$answer" =~ ^[Nn]$ ]]; then
+    info "已取消。"
+    return 0
   fi
-
-  target="$(site_path_for_domain "$domain")"
-  if [[ ! -f "$target" ]]; then
-    error "未找到该域名的独立配置：$target"
-    return 1
-  fi
-
-  confirm_action "确认删除 $domain 的反向代理配置？" || { info "已取消。"; return 0; }
 
   rollback_file="$(mktemp)"
   cp -a -- "$target" "$rollback_file"
