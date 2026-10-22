@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.46"
+readonly MANAGER_VERSION="3.3.47"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -2565,6 +2565,195 @@ docker_container_has_network() {
   return 1
 }
 
+show_gateway_networks() {
+  local container_reference="$1"
+  local container_name="$2"
+  local rows name gateway ip members member member_ip driver project default_network role index=0
+
+  if ! docker inspect "$container_reference" >/dev/null 2>&1; then
+    error "NPM 容器 ${container_reference} 不存在或未运行。"
+    return 1
+  fi
+
+  printf '\n%sNPM 网关与网络连接%s\n' "$BOLD" "$RESET"
+  project="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container_reference" 2>/dev/null || true)"
+  default_network="${project:-npmctl}_default"
+  printf 'NPM 容器：%s\n' "$container_name"
+  printf 'NPM 当前加入的 Docker 网络：\n'
+  rows="$(docker inspect --format '{{range $name, $network := .NetworkSettings.Networks}}{{$name}}|{{$network.Gateway}}|{{$network.IPAddress}}{{"\n"}}{{end}}' "$container_reference" 2>/dev/null || true)"
+  if [[ -z "$rows" ]]; then
+    warn 'NPM 当前没有连接到任何 Docker bridge 网络（可能是 host 网络模式）。'
+  fi
+  while IFS='|' read -r name gateway ip; do
+    [[ -n "$name" ]] || continue
+    ((index += 1))
+    driver="$(docker network inspect --format '{{.Driver}}' "$name" 2>/dev/null || printf '未知')"
+    role='附加网络'
+    [[ "$name" == "$default_network" || "$name" == 'npmctl_default' ]] && role='NPM 默认 Compose bridge 网络'
+    printf '  %d. %s\n' "$index" "$name"
+    printf '     类型：%s | 用途：%s\n' "$driver" "$role"
+    printf '     网关：%s | NPM 容器 IP：%s\n' "${gateway:--}" "${ip:--}"
+    members="$(docker network inspect --format '{{range $id, $container := .Containers}}{{$container.Name}}|{{$container.IPv4Address}}{{"\n"}}{{end}}' "$name" 2>/dev/null || true)"
+    if [[ -n "$members" ]]; then
+      printf '     同网络容器：\n'
+      while IFS='|' read -r member member_ip; do
+        [[ -n "$member" ]] || continue
+        if [[ "$member" == "$container_name" ]]; then
+          printf '       - %s（当前 NPM，IP %s）\n' "$member" "${member_ip:--}"
+        else
+          printf '       - %s（IP %s）\n' "$member" "${member_ip:--}"
+        fi
+      done <<< "$members"
+    else
+      printf '     同网络容器：无\n'
+    fi
+  done <<< "$rows"
+  show_docker_default_bridge_network "$container_name"
+  printf '\n网关地址由 Docker 网络决定；同网络容器可直接使用容器名和容器端口互相访问。\n'
+  printf 'Compose 重建后如需保留额外网络，应在对应 Compose 配置中声明。\n'
+}
+
+show_docker_default_bridge_network() {
+  local container_name="$1"
+  local gateway members member member_ip npm_member=0
+  docker network inspect bridge >/dev/null 2>&1 || return 0
+  gateway="$(docker network inspect --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' bridge 2>/dev/null || true)"
+  members="$(docker network inspect --format '{{range $id, $container := .Containers}}{{$container.Name}}|{{$container.IPv4Address}}{{"\n"}}{{end}}' bridge 2>/dev/null || true)"
+  printf '\nDocker 系统默认 bridge 网络：\n'
+  printf '  网络：bridge | 驱动：bridge | 网关：%s\n' "${gateway:--}"
+  if [[ -n "$members" ]]; then
+    printf '  网络成员：\n'
+    while IFS='|' read -r member member_ip; do
+      [[ -n "$member" ]] || continue
+      [[ "$member" == "$container_name" ]] && npm_member=1
+      printf '    - %s（IP %s）\n' "$member" "${member_ip:--}"
+    done <<< "$members"
+  else
+    printf '  网络成员：无\n'
+  fi
+  if (( npm_member == 1 )); then
+    printf '  NPM 状态：已加入 Docker 系统默认 bridge 网络。\n'
+  else
+    printf '  NPM 状态：未加入；Compose 默认网络与系统默认 bridge 是不同网络。\n'
+  fi
+}
+
+disconnect_npm_network() {
+  local container_reference="$1"
+  local container_name="$2"
+  local selected network index
+  local -a networks=()
+
+  mapfile -t networks < <(docker_container_network_names "$container_reference" | awk 'NF')
+  ((${#networks[@]} > 0)) || { warn 'NPM 当前没有可断开的 Docker 网络。'; return 0; }
+  printf '\n当前连接的 Docker 网络：\n'
+  for index in "${!networks[@]}"; do
+    printf '  %d. %s\n' "$((index + 1))" "${networks[$index]}"
+  done
+  read -r -p "选择要断开的网络 [1-${#networks[@]}，回车取消]：" selected || return 0
+  [[ -z "$selected" ]] && return 0
+  [[ "$selected" =~ ^[0-9]+$ ]] && ((selected >= 1 && selected <= ${#networks[@]})) || { error '无效选项。'; return 1; }
+  network="${networks[$((selected - 1))]}"
+  if ((${#networks[@]} == 1)); then
+    warn '这是 NPM 当前唯一的 Docker 网络；断开后容器将失去 Docker bridge 网络连接。'
+  fi
+  confirm_action "确认断开 NPM ${container_name} 与网络 ${network} 的连接？" || { info '已取消。'; return 0; }
+  if docker network disconnect "$network" "$container_reference"; then
+    success "已断开 NPM ${container_name} 与网络 ${network} 的连接。"
+  else
+    error "断开网络 ${network} 失败。"
+    return 1
+  fi
+}
+
+connect_npm_network() {
+  local container_reference="$1"
+  local container_name="$2"
+  local selected network driver scope attached is_attached index
+  local -a networks=() attached_networks=()
+
+  mapfile -t attached_networks < <(docker_container_network_names "$container_reference" | awk 'NF')
+  while IFS= read -r network; do
+    [[ -n "$network" ]] || continue
+    is_attached=0
+    for attached in "${attached_networks[@]}"; do
+      [[ "$network" == "$attached" ]] && { is_attached=1; break; }
+    done
+    ((is_attached == 0)) && networks+=("$network")
+  done < <(docker network ls --format '{{.Name}}' 2>/dev/null)
+
+  ((${#networks[@]} > 0)) || { warn '没有可连接的 Docker 网络。'; return 0; }
+  printf '\n可连接的 Docker 网络：\n'
+  for index in "${!networks[@]}"; do
+    network="${networks[$index]}"
+    driver="$(docker network inspect --format '{{.Driver}}' "$network" 2>/dev/null || printf '%s' '未知')"
+    scope="$(docker network inspect --format '{{.Scope}}' "$network" 2>/dev/null || printf '%s' '未知')"
+    printf '  %d. %s（驱动：%s，范围：%s）\n' "$((index + 1))" "$network" "$driver" "$scope"
+  done
+  read -r -p "选择要连接的网络 [1-${#networks[@]}，回车取消]：" selected || return 0
+  [[ -z "$selected" ]] && return 0
+  [[ "$selected" =~ ^[0-9]+$ ]] && ((selected >= 1 && selected <= ${#networks[@]})) || { error '无效选项。'; return 1; }
+  network="${networks[$((selected - 1))]}"
+  confirm_action "确认将 NPM ${container_name} 连接到网络 ${network}？" || { info '已取消。'; return 0; }
+  if docker network connect "$network" "$container_reference"; then
+    success "NPM ${container_name} 已连接到网络 ${network}。"
+  else
+    error "连接网络 ${network} 失败。"
+    return 1
+  fi
+}
+
+gateway_settings_menu() {
+  local choice container_id container_name image selected
+  local -a containers=()
+
+  command -v docker >/dev/null 2>&1 || { error '未检测到 Docker 命令。'; return 1; }
+  docker info >/dev/null 2>&1 || { error '无法连接 Docker 服务。'; return 1; }
+  mapfile -t containers < <(find_npm_containers)
+  if ((${#containers[@]} == 0)); then
+    warn '未自动识别到运行中的 Nginx Proxy Manager 容器。'
+    show_running_docker_containers
+    read -r -p '输入 NPM 容器名称或 ID（直接回车返回）: ' container_id || return 0
+    [[ -n "$container_id" ]] || return 0
+    IFS='|' read -r container_id container_name image < <(docker inspect --format '{{.Id}}|{{.Name}}|{{.Config.Image}}' "$container_id" 2>/dev/null)
+    container_name="${container_name#/}"
+    if [[ -z "$container_id" ]] || ! is_npm_container "$image" "$container_name"; then
+      error '所选容器无法识别为 Nginx Proxy Manager。'
+      return 1
+    fi
+  elif ((${#containers[@]} == 1)); then
+    IFS=$'\t' read -r container_id container_name image <<< "${containers[0]}"
+  else
+    printf '\n检测到多个 NPM 容器：\n'
+    for choice in "${!containers[@]}"; do
+      IFS=$'\t' read -r container_id container_name image <<< "${containers[$choice]}"
+      printf '  %d. %s（镜像：%s）\n' "$((choice + 1))" "$container_name" "$image"
+    done
+    read -r -p "选择 NPM 容器 [1-${#containers[@]}，回车返回]：" selected || return 0
+    [[ -n "$selected" ]] || return 0
+    [[ "$selected" =~ ^[0-9]+$ ]] && ((selected >= 1 && selected <= ${#containers[@]})) || { error '无效选项。'; return 1; }
+    IFS=$'\t' read -r container_id container_name image <<< "${containers[$((selected - 1))]}"
+  fi
+
+  while true; do
+    printf '\n%s网关设置%s（NPM：%s）\n' "$BOLD" "$RESET" "$container_name"
+    printf '  1. 查看当前网关与网络\n'
+    printf '  2. 断开 NPM 网络（移除对应网关）\n'
+    printf '  3. 连接已有 Docker 网络（新增网关）\n'
+    printf '  4. 本机 TCP 服务监听地址\n'
+    printf '  0. 返回\n'
+    read -r -p '请选择 [0-4]：' choice || return 0
+    case "$choice" in
+      1) show_gateway_networks "$container_id" "$container_name"; pause_menu ;;
+      2) disconnect_npm_network "$container_id" "$container_name"; pause_menu ;;
+      3) connect_npm_network "$container_id" "$container_name"; pause_menu ;;
+      4) show_all_local_listeners; pause_menu ;;
+      0) return 0 ;;
+      *) error '无效选项。'; pause_menu ;;
+    esac
+  done
+}
+
 connect_container_to_network() {
   local container_reference="$1"
   local container_name="$2"
@@ -3271,17 +3460,18 @@ draw_menu() {
   printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
   printf '  1. 更新 CaddyCtl 管理菜单\n'
   printf '  2. 本机服务端口监听助手\n'
-  printf '  3. 查看运行状态\n'
-  printf '  4. 安装或更新 Caddy\n'
-  printf '  5. 新增反向代理\n'
-  printf '  6. 修改现有反向代理\n'
-  printf '  7. 查看当前反向代理配置\n'
-  printf '  8. 删除反向代理\n'
-  printf '  9. 校验并重载 Caddy\n'
-  printf ' 10. 查看 Caddy 端口监听与 Docker 映射\n'
-  printf ' 11. 检测 Caddy 后端服务监听与连通性\n'
-  printf ' 12. 查看 Caddy 服务日志\n'
-  printf ' 13. 卸载 Caddy 或 CaddyCtl\n'
+  printf '  3. 网关设置（查看、连接或断开 Docker 网络）\n'
+  printf '  4. 查看运行状态\n'
+  printf '  5. 安装或更新 Caddy\n'
+  printf '  6. 新增反向代理\n'
+  printf '  7. 修改现有反向代理\n'
+  printf '  8. 查看当前反向代理配置\n'
+  printf '  9. 删除反向代理\n'
+  printf ' 10. 校验并重载 Caddy\n'
+  printf ' 11. 查看 Caddy 端口监听与 Docker 映射\n'
+  printf ' 12. 检测 Caddy 后端服务监听与连通性\n'
+  printf ' 13. 查看 Caddy 服务日志\n'
+  printf ' 14. 卸载 Caddy 或 CaddyCtl\n'
   printf '  0. 退出\n'
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   printf '提示：退出后可在终端输入 caddyctl 再次打开本菜单。\n'
@@ -3325,23 +3515,24 @@ main_menu() {
   local choice
   while true; do
     draw_menu
-    read -r -p "请选择 [0-13]：" choice || exit 0
+    read -r -p "请选择 [0-14]：" choice || exit 0
     printf '\n'
 
     case "$choice" in
       1) update_manager; pause_menu ;;
       2) local_service_listener_assistant; pause_menu ;;
-      3) show_status_detail; pause_menu ;;
-      4) install_or_update_caddy; pause_menu ;;
-      5) configure_proxy; pause_menu ;;
-      6) edit_proxy_config; pause_menu ;;
-      7) show_config; pause_menu ;;
-      8) delete_proxy; pause_menu ;;
-      9) validate_and_reload; pause_menu ;;
-      10) show_listeners; pause_menu ;;
-      11) diagnose_upstream; pause_menu ;;
-      12) show_logs; pause_menu ;;
-      13) uninstall_menu; pause_menu ;;
+      3) gateway_settings_menu; pause_menu ;;
+      4) show_status_detail; pause_menu ;;
+      5) install_or_update_caddy; pause_menu ;;
+      6) configure_proxy; pause_menu ;;
+      7) edit_proxy_config; pause_menu ;;
+      8) show_config; pause_menu ;;
+      9) delete_proxy; pause_menu ;;
+      10) validate_and_reload; pause_menu ;;
+      11) show_listeners; pause_menu ;;
+      12) diagnose_upstream; pause_menu ;;
+      13) show_logs; pause_menu ;;
+      14) uninstall_menu; pause_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac
