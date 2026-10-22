@@ -90,7 +90,7 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | --- | --- |
 | `1` 更新 CaddyCtl 管理菜单 | 下载并替换管理脚本，不改动 Caddy、站点配置或证书。成功后自动重新打开新版本。 |
 | `2` 本机服务端口监听助手 | 检查本机 TCP 服务、Docker 容器和 systemd 服务的监听方式，并提供受限的调整向导。 |
-| `3` 网关设置 | 查看运行中的 NPM 容器网络、网关和同网络容器；查看 Docker 系统默认 `bridge` 网络，并连接或断开已有 Docker 网络。 |
+| `3` 网关设置 | 查看运行中的 NPM 容器网络、网关和同网络容器；查看 Docker 系统默认 `bridge` 网络，并将容器服务加入 Docker 网络或从网络移除。 |
 | `4` 查看运行状态 | 显示 Caddy 安装状态、服务状态、开机启动和站点数量；可查看 systemd 原始详情。 |
 | `5` 安装或更新 Caddy | 未安装时安装官方稳定版；已安装时更新软件包并重启服务。 |
 | `6` 新增反向代理 | 手动填写后端，或进入 Docker 容器连接向导。 |
@@ -104,7 +104,7 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | `14` 卸载 Caddy 或 CaddyCtl | 进入卸载子菜单。选项 `1`、`2` 保留配置；选项 `3` 会删除全部配置和证书。 |
 | `0` 退出 | 退出管理菜单。 |
 
-网关设置会让你选择运行中的 Nginx Proxy Manager 容器，展示其各 Docker 网络的网关、容器 IP 和网络成员，并单独标出 Docker 系统默认 `bridge`（通常网关为 `172.17.0.1`）；也可从子菜单直接查看本机 TCP 监听表。Compose 默认网络与系统默认 `bridge` 是不同网络。连接或断开网络前会要求确认；断开唯一网络时会提醒 NPM 将失去 bridge 网络连接。额外连接的网络若要在 Compose 重建后保留，需在对应 Compose 配置中声明。
+网关设置会让你选择运行中的 Nginx Proxy Manager 容器，展示其各 Docker 网络的网关、容器 IP 和网络成员，并单独标出 Docker 系统默认 `bridge`（通常网关为 `172.17.0.1`）；也可从子菜单直接查看本机 TCP 监听表。Compose 默认网络与系统默认 `bridge` 是不同网络。新增或移除服务时，先选择 Docker 共享网络，再选择相应容器；网络列表显示网关和成员数，且会过滤 `host`、`none` 网络。连接或断开网络前会要求确认，移除 NPM 时会提醒其将无法通过该网络访问同网络服务。网络连接即时作用于当前容器；Compose 重建后如需保留，应在对应 Compose 配置中声明。
 
 ## 子菜单选项
 
