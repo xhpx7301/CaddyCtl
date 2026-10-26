@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.50"
+readonly MANAGER_VERSION="3.3.51"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -140,7 +140,7 @@ cleanup_caddy_l4_build_cache() {
   if command -v go >/dev/null 2>&1; then
     go clean -cache -modcache >/dev/null 2>&1 || true
   fi
-  for path in /tmp/builderenv_* /tmp/caddyctl-l4-build.*; do
+  for path in /tmp/builderenv_* /tmp/caddyctl-l4-build.* /tmp/go-build* /tmp/go-build*_*; do
     [[ -e "$path" ]] || continue
     rm -rf -- "$path"
   done
@@ -786,7 +786,13 @@ install_caddy_l4_binary() {
   xcaddy_path="$(command -v xcaddy 2>/dev/null || true)"
   if [[ -z "$xcaddy_path" ]]; then
     info "正在临时构建 xcaddy（构建缓存仅保存在临时目录）..."
-    if ! GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" GOBIN="${build_dir}/bin" \
+    mkdir -p "$build_dir/tmp" "$build_dir/gotmp" || {
+      rm -rf -- "$build_dir"
+      trap - INT TERM
+      error "无法创建 Go 临时目录。"
+      return 1
+    }
+    if ! env TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" GOBIN="${build_dir}/bin" \
       go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest; then
       rm -rf -- "$build_dir"
       trap - INT TERM
@@ -802,7 +808,13 @@ install_caddy_l4_binary() {
     return 1
   fi
   info "正在构建带 caddy-l4 的 Caddy，这可能需要几分钟..."
-  if ! GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" \
+  mkdir -p "$build_dir/tmp" "$build_dir/gotmp" || {
+    rm -rf -- "$build_dir"
+    trap - INT TERM
+    error "无法创建 Go 临时目录。"
+    return 1
+  }
+  if ! env TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" \
       "$xcaddy_path" build --output "$temp_binary" --with github.com/mholt/caddy-l4; then
     rm -rf -- "$build_dir"
     trap - INT TERM
