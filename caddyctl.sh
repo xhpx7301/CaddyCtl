@@ -839,7 +839,7 @@ show_caddy_l4_saved_state() {
 }
 
 draw_caddy_l4_header() {
-  local title="$1" active
+  local title="$1" active l4_color panel_color reality_color l4_text panel_text reality_text
   if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
   printf '%s============================================%s\n' "$BLUE" "$RESET"
   printf '%s  %s%s\n' "$BOLD" "$title" "$RESET"
@@ -852,12 +852,22 @@ draw_caddy_l4_header() {
     *) active="${active:-未知}" ;;
   esac
   if caddy_l4_enabled; then
-    printf '443 复用：已启用 | Caddy：%s | 面板映射：%s | Reality 映射：%s\n' \
-      "$active" "$(state_has_panel && printf '已启用' || printf '未启用')" "$(state_has_reality && printf '已启用' || printf '未启用')"
+    l4_text='已启用'; l4_color="$GREEN"
+    if state_has_panel; then panel_text='已启用'; panel_color="$GREEN"; else panel_text='未启用'; panel_color="$RED"; fi
+    if state_has_reality; then reality_text='已启用'; reality_color="$GREEN"; else reality_text='未启用'; reality_color="$RED"; fi
+  elif [[ -f "$CADDY_L4_STATE_FILE" ]]; then
+    l4_text='未启用（配置已保存）'; l4_color="$YELLOW"
+    if state_has_panel; then panel_text='已保存'; panel_color="$YELLOW"; else panel_text='未配置'; panel_color="$RED"; fi
+    if state_has_reality; then reality_text='已保存'; reality_color="$YELLOW"; else reality_text='未配置'; reality_color="$RED"; fi
   else
-    printf '443 复用：未启用 | Caddy：%s | 面板映射：%s | Reality 映射：%s\n' \
-      "$active" "$(state_has_panel && printf '已保存' || printf '未配置')" "$(state_has_reality && printf '已保存' || printf '未配置')"
+    l4_text='未配置'; l4_color="$RED"
+    panel_text='未配置'; panel_color="$RED"
+    reality_text='未配置'; reality_color="$RED"
   fi
+  printf '443 复用：%s%s%s | Caddy：%s | 面板映射：%s%s%s | Reality 映射：%s%s%s\n' \
+    "$l4_color" "$l4_text" "$RESET" "$active" \
+    "$panel_color" "$panel_text" "$RESET" \
+    "$reality_color" "$reality_text" "$RESET"
 }
 
 manage_caddy_l4_reality() {
@@ -4456,7 +4466,7 @@ service_value() {
 status_line() {
   local installed="未安装" version="-" active="未运行" enabled="未启用" site_count="0"
   local installed_color="$YELLOW" active_color="$YELLOW" enabled_color="$YELLOW"
-  local service_active service_enabled
+  local service_active service_enabled l4_text l4_color panel_text panel_color reality_text reality_color
 
   if [[ -x "$REAL_CADDY" ]]; then
     installed="已安装"
@@ -4492,14 +4502,22 @@ status_line() {
     "$site_count"
   printf 'Caddy 版本：%s | CaddyCtl 版本：%s\n' "$version" "$MANAGER_VERSION"
   if caddy_l4_enabled; then
-    printf '443 复用：已启用 | 面板映射：%s | Reality 映射：%s\n' \
-      "$(state_has_panel && printf '已启用' || printf '未启用')" "$(state_has_reality && printf '已启用' || printf '未启用')"
+    l4_text='已启用'; l4_color="$GREEN"
+    if state_has_panel; then panel_text='已启用'; panel_color="$GREEN"; else panel_text='未启用'; panel_color="$RED"; fi
+    if state_has_reality; then reality_text='已启用'; reality_color="$GREEN"; else reality_text='未启用'; reality_color="$RED"; fi
   elif [[ -f "$CADDY_L4_STATE_FILE" ]]; then
-    printf '443 复用：未启用（配置已保存） | 面板：%s | Reality：%s\n' \
-      "$(state_has_panel && printf '已保存' || printf '未配置')" "$(state_has_reality && printf '已保存' || printf '未配置')"
+    l4_text='未启用（配置已保存）'; l4_color="$YELLOW"
+    if state_has_panel; then panel_text='已保存'; panel_color="$YELLOW"; else panel_text='未配置'; panel_color="$RED"; fi
+    if state_has_reality; then reality_text='已保存'; reality_color="$YELLOW"; else reality_text='未配置'; reality_color="$RED"; fi
   else
-    printf '443 复用：未配置\n'
+    l4_text='未配置'; l4_color="$RED"
+    panel_text='未配置'; panel_color="$RED"
+    reality_text='未配置'; reality_color="$RED"
   fi
+  printf '443 复用：%s%s%s | 面板映射：%s%s%s | Reality 映射：%s%s%s\n' \
+    "$l4_color" "$l4_text" "$RESET" \
+    "$panel_color" "$panel_text" "$RESET" \
+    "$reality_color" "$reality_text" "$RESET"
 }
 
 draw_menu() {
