@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.62"
+readonly MANAGER_VERSION="3.3.63"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -94,9 +94,14 @@ require_root() {
   exec sudo bash "$(manager_source)" "$@"
 }
 
+caddy_l4_binary_has_listener_module() {
+  local binary="$1"
+  [[ -x "$binary" ]] \
+    && "$binary" list-modules 2>/dev/null | grep -Fq 'caddy.listeners.layer4'
+}
+
 caddy_runtime_binary() {
-  if [[ -x "$CADDY_L4_BINARY" ]] \
-      && "$CADDY_L4_BINARY" list-modules 2>/dev/null | grep -Fq 'layer4'; then
+  if caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"; then
     printf '%s\n' "$CADDY_L4_BINARY"
   else
     printf '%s\n' "$REAL_CADDY"
@@ -104,7 +109,8 @@ caddy_runtime_binary() {
 }
 
 caddy_l4_enabled() {
-  [[ -f "$CADDY_L4_SERVICE_DROPIN" ]] \
+  caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY" \
+    && [[ -f "$CADDY_L4_SERVICE_DROPIN" ]] \
     && grep -Fq "$CADDY_L4_BINARY run" "$CADDY_L4_SERVICE_DROPIN" \
     && grep -Fq "$CADDY_L4_MARKER_BEGIN" "$CADDYFILE" 2>/dev/null
 }
@@ -206,7 +212,7 @@ install_caddy_l4_prebuilt() {
     info "正在下载预编译 caddy-l4（${architecture}，插件 ${plugin_version:-默认版本}）..."
     if download_url_to_file "$download_url" "$temp_binary"; then
       chmod 0755 "$temp_binary"
-      if "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
+      if caddy_l4_binary_has_listener_module "$temp_binary"; then
         if install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
           rm -rf -- "$download_dir"
           success "已安装预编译 caddy-l4。"
@@ -1137,8 +1143,7 @@ prepare_caddy_l4_go() {
 install_caddy_l4_binary() {
   local build_parent build_dir temp_binary xcaddy_path go_bin go_bin_dir
 
-  if [[ -x "$CADDY_L4_BINARY" ]] \
-      && "$CADDY_L4_BINARY" list-modules 2>/dev/null | grep -Fq 'layer4'; then
+  if caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"; then
     return 0
   fi
   if install_caddy_l4_prebuilt; then
@@ -1183,11 +1188,12 @@ install_caddy_l4_binary() {
       "$xcaddy_path" build --output "$temp_binary" --with github.com/mholt/caddy-l4; then
     rm -rf -- "$build_dir"; trap - INT TERM; error "caddy-l4 构建失败。"; return 1
   fi
-  if ! "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
-    rm -rf -- "$build_dir"; trap - INT TERM; error "构建结果未包含 layer4 模块。"; return 1
+  if ! caddy_l4_binary_has_listener_module "$temp_binary"; then
+    rm -rf -- "$build_dir"; trap - INT TERM; error "构建结果未包含 caddy.listeners.layer4 模块。"; return 1
   fi
-  if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
-    rm -rf -- "$build_dir"; trap - INT TERM; return 1
+  if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY" \
+      || ! caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"; then
+    rm -rf -- "$build_dir"; trap - INT TERM; error "caddy-l4 安装后未检测到 caddy.listeners.layer4 模块。"; return 1
   fi
   rm -rf -- "$build_dir"
   trap - INT TERM
