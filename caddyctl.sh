@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.54"
+readonly MANAGER_VERSION="3.3.55"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -612,9 +612,16 @@ $CADDY_L4_MARKER_BEGIN
     servers :443 {
         listener_wrappers {
             layer4 {
-                @caddyctl_panel tls sni $panel_domain
+                @caddyctl_panel tls {
+                    sni $panel_domain
+                    alpn http/1.1 http/1.0
+                }
                 route @caddyctl_panel {
-                    tls
+                    tls {
+                        connection_policy {
+                            alpn http/1.1
+                        }
+                    }
                     proxy tcp/$panel_backend
                 }
 EOF

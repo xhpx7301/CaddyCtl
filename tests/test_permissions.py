@@ -107,6 +107,8 @@ cp -a "$CADDYFILE" "$CADDY_CONFIG_DIR/original"
 printf 'R\\treality.example\\t127.0.0.1\\t15443\\n' >"$CADDY_L4_STATE_FILE"
 write_caddy_l4_block panel.example 127.0.0.1:20534
 [[ "$(stat -c '%U:%G:%a' "$CADDYFILE")" == root:nogroup:640 ]]
+grep -Fq 'alpn http/1.1 http/1.0' "$CADDYFILE"
+grep -Fq 'alpn http/1.1' "$CADDYFILE"
 remove_caddy_l4_block
 [[ "$(stat -c '%U:%G:%a' "$CADDYFILE")" == root:nogroup:640 ]]
 ! grep -q 'listener_wrappers' "$CADDYFILE"
