@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.52"
+readonly MANAGER_VERSION="3.3.53"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -487,8 +487,66 @@ update_manager() {
   return 1
 }
 
+caddy_service_identity() {
+  local service_user service_group
+  service_user="$(systemctl show caddy --property=User --value 2>/dev/null)" || return 1
+  service_user="${service_user:-root}"
+  service_group="$(systemctl show caddy --property=Group --value 2>/dev/null)" || return 1
+  service_group="${service_group:-$(id -gn "$service_user")}"
+  id "$service_user" >/dev/null 2>&1 && [[ -n "$service_group" ]] || {
+    error "无法确定 Caddy 服务用户和用户组，请检查 systemctl cat caddy。"
+    return 1
+  }
+  printf '%s\t%s\n' "$service_user" "$service_group"
+}
+
+prepare_caddy_permissions() {
+  local service_user service_group identity
+  identity="$(caddy_service_identity)" || return 1
+  IFS=$'\t' read -r service_user service_group <<<"$identity"
+
+  # Root owns configuration; the service group may traverse and read it.
+  # Never recursively change certificate files or expose the private TSV state.
+  if ! install -d -o root -g "$service_group" -m 0750 "$CADDY_CONFIG_DIR" "$SITES_DIR" \
+      || ! install -d -o "$service_user" -g "$service_group" -m 0750 "$CADDY_DATA_DIR"; then
+    error "无法设置 Caddy 配置目录或数据目录权限。"
+    return 1
+  fi
+  if [[ -f "$CADDYFILE" ]]; then
+    chgrp "$service_group" "$CADDYFILE" && chmod g+r "$CADDYFILE" || {
+      error "无法设置 Caddyfile 的服务用户读取权限。"
+      return 1
+    }
+  fi
+}
+
+validate_caddy_config() {
+  local runtime="${1:-$(caddy_runtime_binary)}" service_user service_group identity
+  prepare_caddy_permissions || return 1
+  identity="$(caddy_service_identity)" || return 1
+  IFS=$'\t' read -r service_user service_group <<<"$identity"
+  if ! command -v runuser >/dev/null 2>&1; then
+    error "未找到 runuser，无法以 Caddy 服务用户身份校验配置。请安装 util-linux。"
+    return 1
+  fi
+  # Match the package service's data paths instead of inheriting root's XDG paths.
+  if ! runuser -u "$service_user" -g "$service_group" -- env \
+      HOME="$CADDY_DATA_DIR" XDG_CONFIG_HOME="$CADDY_DATA_DIR/.config" \
+      XDG_DATA_HOME="$CADDY_DATA_DIR/.local/share" \
+      "$runtime" validate --config "$CADDYFILE" --adapter caddyfile; then
+    error "以服务用户 ${service_user}:${service_group} 校验失败，未启动或重载新配置；请检查上方的配置及权限错误。"
+    return 1
+  fi
+}
+
+preserve_caddyfile_permissions() {
+  local temp_file="$1"
+  chown --reference="$CADDYFILE" "$temp_file" \
+    && chmod --reference="$CADDYFILE" "$temp_file"
+}
+
 initialize_caddyfile() {
-  install -d -m 0755 /etc/caddy "$SITES_DIR"
+  prepare_caddy_permissions || return 1
 
   if [[ ! -f "$CADDYFILE" ]]; then
     cat >"$CADDYFILE" <<EOF
@@ -496,7 +554,8 @@ $IMPORT_BEGIN
 import $SITES_DIR/*.caddy
 $IMPORT_END
 EOF
-    return
+    prepare_caddy_permissions
+    return $?
   fi
 
   if grep -Fq "$IMPORT_BEGIN" "$CADDYFILE" \
@@ -522,6 +581,7 @@ import $SITES_DIR/*.caddy
 $IMPORT_END
 EOF
   fi
+  prepare_caddy_permissions
 }
 
 write_caddy_l4_block() {
@@ -529,7 +589,7 @@ write_caddy_l4_block() {
   local panel_backend="$2"
   local existing temp_file reality_sni reality_host reality_port route_name route_index=0
 
-  [[ -f "$CADDYFILE" ]] || initialize_caddyfile
+  [[ -f "$CADDYFILE" ]] || { initialize_caddyfile || return 1; }
   existing="$(mktemp)" || return 1
   awk -v begin="$CADDY_L4_MARKER_BEGIN" -v end="$CADDY_L4_MARKER_END" '
     $0 == begin { skip=1; next }
@@ -577,7 +637,7 @@ $CADDY_L4_MARKER_END
 
 EOF
   cat "$existing" >>"$temp_file" || { rm -f -- "$existing" "$temp_file"; return 1; }
-  chmod --reference="$CADDYFILE" "$temp_file" 2>/dev/null || chmod 0644 "$temp_file"
+  preserve_caddyfile_permissions "$temp_file" || { rm -f -- "$existing" "$temp_file"; return 1; }
   backup_file "$CADDYFILE" "Caddyfile-before-layer4"
   if ! mv -f -- "$temp_file" "$CADDYFILE"; then
     rm -f -- "$existing" "$temp_file"
@@ -588,9 +648,10 @@ EOF
 
 remove_caddy_l4_block() {
   local temp_file
-  temp_file="$(mktemp)" || return 1
+  temp_file="$(mktemp "${CADDYFILE}.caddyctl.XXXXXX")" || return 1
   awk -v begin="$CADDY_L4_MARKER_BEGIN" -v end="$CADDY_L4_MARKER_END" '$0 == begin {skip=1; next} $0 == end {skip=0; next} !skip {print}' "$CADDYFILE" >"$temp_file" || { rm -f -- "$temp_file"; return 1; }
-  mv -f -- "$temp_file" "$CADDYFILE"
+  preserve_caddyfile_permissions "$temp_file" \
+    && mv -f -- "$temp_file" "$CADDYFILE" || { rm -f -- "$temp_file"; return 1; }
 }
 
 write_caddy_l4_panel_site() {
@@ -692,7 +753,7 @@ apply_caddy_l4_state() {
     return 1
   }
   runtime="$(caddy_runtime_binary)"
-  if ! "$runtime" validate --config "$CADDYFILE" --adapter caddyfile || ! systemctl restart caddy; then
+  if ! validate_caddy_config "$runtime" || ! systemctl restart caddy; then
     error "新映射校验或重启失败，恢复之前配置。"
     cp -a "$old_caddy" "$CADDYFILE"
     cp -a "$old_state" "$CADDY_L4_STATE_FILE"
@@ -969,8 +1030,7 @@ configure_caddy_l4() {
   if [[ -f "$CADDYFILE" ]]; then caddyfile_existed=true; cp -a "$CADDYFILE" "${snapshot_dir}/Caddyfile" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
   if [[ -f "$CADDY_L4_STATE_FILE" ]]; then state_existed=true; cp -a "$CADDY_L4_STATE_FILE" "${snapshot_dir}/state.tsv" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
   if [[ -f "$CADDY_L4_SERVICE_DROPIN" ]]; then dropin_existed=true; cp -a "$CADDY_L4_SERVICE_DROPIN" "${snapshot_dir}/caddyctl-l4.conf" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
-  initialize_caddyfile
-  install -d -m 0750 "$(dirname "$CADDY_L4_STATE_FILE")"
+  initialize_caddyfile || { rm -rf -- "$snapshot_dir"; return 1; }
   printf 'P\t%s\t%s\t%s\nR\t%s\t%s\t%s\n' \
     "$panel_domain" "$panel_host" "$panel_port" \
     "$reality_sni" "$reality_host" "$reality_port" >"$CADDY_L4_STATE_FILE"
@@ -1000,7 +1060,7 @@ configure_caddy_l4() {
     return 1
   }
   runtime="$(caddy_runtime_binary)"
-  if ! "$runtime" validate --config "$CADDYFILE" --adapter caddyfile; then
+  if ! validate_caddy_config "$runtime"; then
     error "caddy-l4 配置校验失败，正在恢复。"
     disable_caddy_l4_service
     remove_caddy_l4_block || true
@@ -1056,6 +1116,7 @@ disable_caddy_l4() {
   temp_file="${temp_dir}/Caddyfile.new"
   awk -v begin="$CADDY_L4_MARKER_BEGIN" -v end="$CADDY_L4_MARKER_END" '$0 == begin {skip=1; next} $0 == end {skip=0; next} !skip {print}' "$CADDYFILE" >"$temp_file" || { rm -rf -- "$temp_dir"; return 1; }
   backup_file "$CADDYFILE" "Caddyfile-before-layer4-disable"
+  preserve_caddyfile_permissions "$temp_file" || { rm -rf -- "$temp_dir"; return 1; }
   mv -f -- "$temp_file" "$CADDYFILE" || { rm -rf -- "$temp_dir"; return 1; }
   for panel_site in "$SITES_DIR"/*.caddy; do
     [[ -f "$panel_site" ]] || continue
@@ -1065,7 +1126,7 @@ disable_caddy_l4() {
   done
   disable_caddy_l4_service
   runtime="$REAL_CADDY"
-  if ! "$runtime" validate --config "$CADDYFILE" --adapter caddyfile || ! systemctl restart caddy; then
+  if ! validate_caddy_config "$runtime" || ! systemctl restart caddy; then
     error "关闭复用后的校验或重启失败，正在恢复原配置。"
     cp -a "${temp_dir}/Caddyfile" "$CADDYFILE"
     if [[ "$had_dropin" == true ]]; then
@@ -1277,10 +1338,10 @@ install_caddy() {
     return 1
   fi
 
-  initialize_caddyfile
+  initialize_caddyfile || return 1
   install_manager_command || return 1
 
-  if ! "$(caddy_runtime_binary)" validate --config "$CADDYFILE" --adapter caddyfile; then
+  if ! validate_caddy_config; then
     error "现有 Caddyfile 校验失败，未启动服务。请先修正配置。"
     return 1
   fi
@@ -1343,6 +1404,7 @@ update_caddy() {
   fi
 
   install_manager_command || return 1
+  validate_caddy_config || return 1
   systemctl restart caddy || {
     error "更新完成，但服务重启失败。请查看日志。"
     return 1
@@ -1489,7 +1551,7 @@ format_upstream_host() {
 reload_validated_config() {
   local runtime
   runtime="$(caddy_runtime_binary)"
-  if ! "$runtime" validate --config "$CADDYFILE" --adapter caddyfile; then
+  if ! validate_caddy_config "$runtime"; then
     return 1
   fi
 
@@ -1550,7 +1612,7 @@ save_proxy_config() {
     return 1
   fi
 
-  initialize_caddyfile
+  initialize_caddyfile || return 1
   target="$(site_path_for_domain "$domain")"
   temp_file="$(mktemp "${SITES_DIR}/.${domain}.XXXXXX")" || return 1
   formatted_host="$(format_upstream_host "$upstream_host")"

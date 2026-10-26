@@ -210,6 +210,20 @@ Nginx Proxy Manager，请优先使用共享网络，而不是把应用端口开�
 | CaddyCtl 主脚本 | `/usr/local/lib/caddyctl/caddyctl.sh` |
 | `caddyctl` 命令入口 | `/usr/local/bin/caddyctl` |
 
+## 配置权限与启动故障
+
+安装、更新、重载及应用 443 复用配置前，脚本会读取 systemd 中的 Caddy 服务用户和用户组，
+确保 `/etc/caddy`、`/etc/caddy/sites` 由 root 管理且服务组可进入，主配置对服务组可读，
+并创建归服务用户所有的 `/var/lib/caddy` 数据目录。替换主配置时保留属主和权限；
+复用状态文件仍只允许 root 读取，不会递归修改证书文件权限。
+
+配置校验通过 `runuser`（util-linux）以服务用户身份执行，避免 root 校验通过但服务读取配置时报
+`permission denied`。已遇到旧版本权限问题的服务器，更新管理脚本后可选择主菜单 `10` 修复目录权限、
+校验并启动服务。自定义引用文件的权限错误仍需根据校验输出处理。
+
+`No files matching import glob pattern` 表示站点目录没有 `.caddy` 配置文件；首次安装时属于正常提示，
+服务运行不代表已经配置面板反代或启用 443 复用。
+
 ## 部署建议
 
 | 项目 | 建议 |
