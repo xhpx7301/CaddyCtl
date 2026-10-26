@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.56"
+readonly MANAGER_VERSION="3.3.57"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -585,12 +585,28 @@ EOF
   prepare_caddy_permissions
 }
 
+state_has_panel() {
+  [[ -f "$CADDY_L4_STATE_FILE" ]] && awk -F '\t' '$1 == "P" {found=1} END {exit !found}' "$CADDY_L4_STATE_FILE"
+}
+
+state_has_reality() {
+  [[ -f "$CADDY_L4_STATE_FILE" ]] && awk -F '\t' '$1 == "R" {found=1} END {exit !found}' "$CADDY_L4_STATE_FILE"
+}
+
 write_caddy_l4_block() {
-  local panel_domain="$1"
-  local panel_backend="$2"
-  local existing temp_file reality_sni reality_host reality_port route_name route_index=0
+  local panel_domain="${1:-}" panel_backend="${2:-}"
+  local existing temp_file reality_sni reality_host reality_port route_name route_index=0 panel_host panel_port
 
   [[ -f "$CADDYFILE" ]] || { initialize_caddyfile || return 1; }
+  if [[ -z "$panel_domain" || -z "$panel_backend" ]]; then
+    IFS=$'\t' read -r panel_domain panel_host panel_port <<<"$(read_caddy_l4_panel)"
+    if [[ -n "$panel_domain" && -n "$panel_host" && -n "$panel_port" ]]; then
+      panel_backend="$(format_upstream_host "$panel_host"):${panel_port}"
+    else
+      panel_domain=""
+      panel_backend=""
+    fi
+  fi
   existing="$(mktemp)" || return 1
   awk -v begin="$CADDY_L4_MARKER_BEGIN" -v end="$CADDY_L4_MARKER_END" '
     $0 == begin { skip=1; next }
@@ -598,8 +614,6 @@ write_caddy_l4_block() {
     !skip { print }
   ' "$CADDYFILE" >"$existing" || { rm -f -- "$existing"; return 1; }
 
-  # A user-maintained global options block needs manual merging; inserting a
-  # second global block would make Caddy reject the complete configuration.
   if [[ "$(awk 'NF && $0 !~ /^[[:space:]]*#/ { print; exit }' "$existing")" == "{" ]]; then
     rm -f -- "$existing"
     error "现有 Caddyfile 已包含全局 options 块，无法自动插入 caddy-l4 配置；请先手工合并 layer4 配置。"
@@ -613,6 +627,9 @@ $CADDY_L4_MARKER_BEGIN
     servers :443 {
         listener_wrappers {
             layer4 {
+EOF
+  if [[ -n "$panel_domain" && -n "$panel_backend" ]]; then
+    cat >>"$temp_file" <<EOF
                 @caddyctl_panel tls {
                     sni $panel_domain
                     alpn http/1.1 http/1.0
@@ -626,6 +643,7 @@ $CADDY_L4_MARKER_BEGIN
                     proxy tcp/$panel_backend
                 }
 EOF
+  fi
   while IFS=$'\t' read -r reality_sni reality_host reality_port; do
     [[ -n "$reality_sni" ]] || continue
     ((route_index+=1))
@@ -714,50 +732,54 @@ read_caddy_l4_panel() {
 apply_caddy_l4_state() {
   local panel_domain panel_host panel_port old_caddy old_site runtime old_state old_panel_domain old_panel_site_backup="" old_panel_site_path=""
   local -a panel=()
+  local site_existed=false
   [[ -f "$CADDY_L4_STATE_FILE" ]] || { error "未找到 443 复用配置。"; return 1; }
   IFS=$'\t' read -r -a panel <<<"$(read_caddy_l4_panel)"
   panel_domain="${panel[0]:-}"; panel_host="${panel[1]:-}"; panel_port="${panel[2]:-}"
-  old_panel_domain="${1:-$(awk -F '\t' '$1=="P"{print $2;exit}' "$CADDY_L4_STATE_FILE")}"
-  is_valid_domain "$panel_domain" && is_valid_upstream_host "$panel_host" && is_valid_port "$panel_port" || {
-    error "面板配置无效。"
-    return 1
-  }
-  if [[ -f "$(site_path_for_domain "$panel_domain")" ]] \
-      && ! grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$(site_path_for_domain "$panel_domain")"; then
-    error "面板域名已有其他站点配置，拒绝覆盖。"
+  old_panel_domain="${1:-$panel_domain}"
+  if [[ -n "$panel_domain" ]]; then
+    is_valid_domain "$panel_domain" && is_valid_upstream_host "$panel_host" && is_valid_port "$panel_port" || {
+      error "面板配置无效。"
+      return 1
+    }
+    if [[ -f "$(site_path_for_domain "$panel_domain")" ]] \
+        && ! grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$(site_path_for_domain "$panel_domain")"; then
+      error "面板域名已有其他站点配置，拒绝覆盖。"
+      return 1
+    fi
+  fi
+  if ! state_has_panel && ! state_has_reality; then
+    error "至少需要配置面板映射或 Reality 映射。"
     return 1
   fi
   old_caddy="$(mktemp)" || return 1
   cp -a "$CADDYFILE" "$old_caddy" || { rm -f "$old_caddy"; return 1; }
   old_state="$(mktemp)" || { rm -f "$old_caddy"; return 1; }
   cp -a "$CADDY_L4_STATE_FILE" "$old_state" || { rm -f "$old_caddy" "$old_state"; return 1; }
-  old_site="$(mktemp)" || { rm -f "$old_caddy"; return 1; }
-  local site_existed=false
-  if [[ -f "$(site_path_for_domain "$panel_domain")" ]]; then
+  old_site="$(mktemp)" || { rm -f "$old_caddy" "$old_state"; return 1; }
+  if [[ -n "$panel_domain" && -f "$(site_path_for_domain "$panel_domain")" ]]; then
     site_existed=true
     cp -a "$(site_path_for_domain "$panel_domain")" "$old_site"
   fi
-  if [[ "$old_panel_domain" != "$panel_domain" ]] \
+  if [[ -n "$panel_domain" && "$old_panel_domain" != "$panel_domain" ]] \
       && grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$(site_path_for_domain "$old_panel_domain")" 2>/dev/null; then
     old_panel_site_path="$(site_path_for_domain "$old_panel_domain")"
-    old_panel_site_backup="$(mktemp)" || { rm -f "$old_caddy" "$old_state"; return 1; }
-    cp -a "$old_panel_site_path" "$old_panel_site_backup" || { rm -f "$old_caddy" "$old_state" "$old_panel_site_backup"; return 1; }
+    old_panel_site_backup="$(mktemp)" || { rm -f "$old_caddy" "$old_state" "$old_site"; return 1; }
+    cp -a "$old_panel_site_path" "$old_panel_site_backup" || { rm -f "$old_caddy" "$old_state" "$old_site" "$old_panel_site_backup"; return 1; }
     backup_file "$old_panel_site_path" "${old_panel_domain}.caddy-before-layer4-rename"
     rm -f -- "$old_panel_site_path"
   fi
-  if ! write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port" >/dev/null; then
-    if [[ -n "$old_panel_site_backup" ]]; then
-      install -m 0644 "$old_panel_site_backup" "$old_panel_site_path"
-    fi
+  if [[ -n "$panel_domain" ]] && ! write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port" >/dev/null; then
+    [[ -z "$old_panel_site_backup" ]] || install -m 0644 "$old_panel_site_backup" "$old_panel_site_path"
     rm -f "$old_caddy" "$old_state" "$old_site" "$old_panel_site_backup"
     return 1
   fi
-  write_caddy_l4_block "$panel_domain" "$(format_upstream_host "$panel_host"):${panel_port}" || {
+  write_caddy_l4_block "$panel_domain" "$( [[ -n "$panel_domain" ]] && printf '%s:%s' "$(format_upstream_host "$panel_host")" "$panel_port" )" || {
     cp -a "$old_caddy" "$CADDYFILE"
     cp -a "$old_state" "$CADDY_L4_STATE_FILE"
-    restore_caddy_l4_panel_site "$panel_domain" "$site_existed" "$old_site"
+    if [[ -n "$panel_domain" ]]; then restore_caddy_l4_panel_site "$panel_domain" "$site_existed" "$old_site"; fi
     [[ -z "$old_panel_site_backup" ]] || install -m 0644 "$old_panel_site_backup" "$old_panel_site_path"
-    rm -f "$old_caddy" "$old_state" "$old_panel_site_backup"
+    rm -f "$old_caddy" "$old_state" "$old_site" "$old_panel_site_backup"
     return 1
   }
   runtime="$(caddy_runtime_binary)"
@@ -765,10 +787,10 @@ apply_caddy_l4_state() {
     error "新映射校验或重启失败，恢复之前配置。"
     cp -a "$old_caddy" "$CADDYFILE"
     cp -a "$old_state" "$CADDY_L4_STATE_FILE"
-    restore_caddy_l4_panel_site "$panel_domain" "$site_existed" "$old_site"
+    if [[ -n "$panel_domain" ]]; then restore_caddy_l4_panel_site "$panel_domain" "$site_existed" "$old_site"; fi
     [[ -z "$old_panel_site_backup" ]] || install -m 0644 "$old_panel_site_backup" "$old_panel_site_path"
     systemctl restart caddy >/dev/null 2>&1 || true
-    rm -f "$old_caddy" "$old_state" "$old_panel_site_backup"
+    rm -f "$old_caddy" "$old_state" "$old_site" "$old_panel_site_backup"
     return 1
   fi
   rm -f "$old_caddy" "$old_site" "$old_state" "$old_panel_site_backup"
@@ -781,10 +803,14 @@ print_caddy_l4_state() {
     warn "未找到复用状态文件，请检查 $CADDY_L4_STATE_FILE。"
     return 1
   fi
-  printf '\n面板入口（HTTPS → HTTP）：\n'
-  while IFS=$'\t' read -r type name host port; do
-    [[ "$type" == P ]] && printf '  https://%s -> http://%s:%s\n' "$name" "$(format_upstream_host "$host")" "$port"
-  done <"$CADDY_L4_STATE_FILE"
+  if state_has_panel; then
+    printf '\n面板入口（HTTPS → HTTP）：\n'
+    while IFS=$'\t' read -r type name host port; do
+      [[ "$type" == P ]] && printf '  https://%s -> http://%s:%s\n' "$name" "$(format_upstream_host "$host")" "$port"
+    done <"$CADDY_L4_STATE_FILE"
+  else
+    printf '\n面板入口：未配置（当前仅使用 Reality 映射）\n'
+  fi
   count="$(awk -F '\t' '$1 == "R" {n++} END {print n+0}' "$CADDY_L4_STATE_FILE")"
   printf '\nReality SNI 映射（%s 个，公网 TCP 443）：\n' "$count"
   while IFS=$'\t' read -r type name host port; do
@@ -826,9 +852,11 @@ draw_caddy_l4_header() {
     *) active="${active:-未知}" ;;
   esac
   if caddy_l4_enabled; then
-    printf '443 复用：已启用 | Caddy：%s\n' "$active"
+    printf '443 复用：已启用 | Caddy：%s | 面板映射：%s | Reality 映射：%s\n' \
+      "$active" "$(state_has_panel && printf '已启用' || printf '未启用')" "$(state_has_reality && printf '已启用' || printf '未启用')"
   else
-    printf '443 复用：未启用 | Caddy：%s\n' "$active"
+    printf '443 复用：未启用 | Caddy：%s | 面板映射：%s | Reality 映射：%s\n' \
+      "$active" "$(state_has_panel && printf '已保存' || printf '未配置')" "$(state_has_reality && printf '已保存' || printf '未配置')"
   fi
 }
 
@@ -925,6 +953,29 @@ edit_caddy_l4_reality() {
   esac
 }
 
+add_caddy_l4_panel() {
+  local domain host port state_backup
+  [[ -f "$CADDY_L4_STATE_FILE" ]] || { error "请先初始化 443 映射。"; return 1; }
+  state_has_panel && { error "面板映射已存在，请选择修改面板入口。"; return 1; }
+  printf '\n%s添加面板映射%s\n' "$BOLD" "$RESET"
+  read -r -p '3x-ui 面板域名：' domain; domain="${domain,,}"
+  is_valid_domain "$domain" || { error '域名格式不正确。'; return 1; }
+  if awk -F '\t' -v d="$domain" '$1=="R" && $2==d {found=1} END{exit !found}' "$CADDY_L4_STATE_FILE"; then
+    error '面板域名与 Reality SNI 冲突。'; return 1
+  fi
+  read -r -p '3x-ui 面板后端地址 [127.0.0.1]：' host; host="${host:-127.0.0.1}"; host="${host#[}"; host="${host%]}"
+  is_valid_upstream_host "$host" || { error '后端地址格式不正确。'; return 1; }
+  read -r -p '3x-ui 面板 HTTP 端口：' port
+  is_valid_port "$port" || { error '端口格式不正确。'; return 1; }
+  state_backup="$(mktemp)" || return 1
+  cp -a "$CADDY_L4_STATE_FILE" "$state_backup" || { rm -f "$state_backup"; return 1; }
+  printf 'P\t%s\t%s\t%s\n' "$domain" "$host" "$port" >>"$CADDY_L4_STATE_FILE"
+  if ! apply_caddy_l4_state; then
+    cp -a "$state_backup" "$CADDY_L4_STATE_FILE"; rm -f "$state_backup"; return 1
+  fi
+  rm -f "$state_backup"
+}
+
 edit_caddy_l4_panel() {
   local old_domain host port domain tmp state_backup
   IFS=$'\t' read -r old_domain host port <<<"$(read_caddy_l4_panel)"
@@ -949,67 +1000,49 @@ edit_caddy_l4_panel() {
 }
 
 enable_saved_caddy_l4() {
-  local panel_domain panel_host panel_port target disabled_site site_state site_rollback=""
+  local panel_domain="" panel_host="" panel_port="" target="" disabled_site="" site_state="" site_rollback=""
   local caddyfile_existed=false site_existed=false dropin_existed=false
   local snapshot_dir runtime
 
-  [[ -f "$CADDY_L4_STATE_FILE" ]] || {
-    error "没有找到已保存的 443 复用配置，请先初始化。"
-    return 1
-  }
-  IFS=$'\t' read -r panel_domain panel_host panel_port <<<"$(read_caddy_l4_panel)"
-  is_valid_domain "$panel_domain" && is_valid_upstream_host "$panel_host" && is_valid_port "$panel_port" || {
-    error "已保存的面板配置无效，无法重新启用。"
-    return 1
-  }
-  target="$(site_path_for_domain "$panel_domain")"
-  disabled_site="${target}${CADDY_L4_DISABLED_SITE_SUFFIX}"
-  if [[ -f "$target" ]] && ! grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$target"; then
-    error "面板域名已有其他站点配置，拒绝覆盖：$target"
-    return 1
+  [[ -f "$CADDY_L4_STATE_FILE" ]] || { error "没有找到已保存的 443 复用配置，请先初始化。"; return 1; }
+  if state_has_panel; then
+    IFS=$'\t' read -r panel_domain panel_host panel_port <<<"$(read_caddy_l4_panel)"
+    is_valid_domain "$panel_domain" && is_valid_upstream_host "$panel_host" && is_valid_port "$panel_port" || {
+      error "已保存的面板配置无效，无法重新启用。"; return 1;
+    }
+    target="$(site_path_for_domain "$panel_domain")"
+    disabled_site="${target}${CADDY_L4_DISABLED_SITE_SUFFIX}"
+    if [[ -f "$target" ]] && ! grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$target"; then
+      error "面板域名已有其他站点配置，拒绝覆盖：$target"; return 1
+    fi
   fi
-  confirm_action "使用已保存配置重新启用 443 SNI 分流（面板 ${panel_domain}）？" || {
-    info "已取消。"
-    return 0
-  }
+  state_has_panel || state_has_reality || { error "保存的配置没有面板或 Reality 映射。"; return 1; }
+  confirm_action "使用已保存配置重新启用 443 SNI 分流？" || { info "已取消。"; return 0; }
   install_caddy_l4_binary || return 1
   snapshot_dir="$(mktemp -d)" || return 1
-  if [[ -f "$CADDYFILE" ]]; then
-    caddyfile_existed=true
-    cp -a "$CADDYFILE" "${snapshot_dir}/Caddyfile" || { rm -rf -- "$snapshot_dir"; return 1; }
-  fi
-  if [[ -f "$target" ]]; then
-    site_existed=true
-    cp -a "$target" "${snapshot_dir}/panel.caddy" || { rm -rf -- "$snapshot_dir"; return 1; }
-  fi
-  if [[ -f "$CADDY_L4_SERVICE_DROPIN" ]]; then
-    dropin_existed=true
-    cp -a "$CADDY_L4_SERVICE_DROPIN" "${snapshot_dir}/caddyctl-l4.conf" || { rm -rf -- "$snapshot_dir"; return 1; }
-  fi
+  if [[ -f "$CADDYFILE" ]]; then caddyfile_existed=true; cp -a "$CADDYFILE" "${snapshot_dir}/Caddyfile" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
+  if [[ -n "$target" && -f "$target" ]]; then site_existed=true; cp -a "$target" "${snapshot_dir}/panel.caddy" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
+  if [[ -f "$CADDY_L4_SERVICE_DROPIN" ]]; then dropin_existed=true; cp -a "$CADDY_L4_SERVICE_DROPIN" "${snapshot_dir}/caddyctl-l4.conf" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
   initialize_caddyfile || { rm -rf -- "$snapshot_dir"; return 1; }
-  if [[ -f "$disabled_site" ]] && grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$disabled_site"; then
-    site_state=""
+  if [[ -n "$panel_domain" && -f "$disabled_site" ]] && grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$disabled_site"; then
     install -m 0644 "$disabled_site" "$target" && site_state=restored
-  else
+  elif [[ -n "$panel_domain" ]]; then
     site_state="$(write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port")" || site_state=""
     IFS=$'\t' read -r _ site_rollback <<<"$site_state"
-    [[ -z "$site_rollback" ]] || rm -f -- "$site_rollback"
+  else
+    site_state=ready
   fi
   if [[ -z "$site_state" ]] \
-      || ! write_caddy_l4_block "$panel_domain" "$(format_upstream_host "$panel_host"):${panel_port}" \
+      || ! write_caddy_l4_block "$panel_domain" "${panel_domain:+$(format_upstream_host "$panel_host"):$panel_port}" \
       || ! enable_caddy_l4_service; then
     error "重新启用配置失败，正在恢复。"
     remove_caddy_l4_block >/dev/null 2>&1 || true
     disable_caddy_l4_service >/dev/null 2>&1 || true
     if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
-    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; else rm -f -- "$target"; fi
-    if [[ "$dropin_existed" == true ]]; then
-      install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"
-      cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"
-    fi
+    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; elif [[ -n "$target" ]]; then rm -f -- "$target"; fi
+    if [[ "$dropin_existed" == true ]]; then install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"; cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"; fi
     systemctl daemon-reload >/dev/null 2>&1 || true
-    rm -rf -- "$snapshot_dir"
-    return 1
+    rm -rf -- "$snapshot_dir"; return 1
   fi
   runtime="$(caddy_runtime_binary)"
   if ! validate_caddy_config "$runtime" || ! systemctl restart caddy; then
@@ -1017,17 +1050,14 @@ enable_saved_caddy_l4() {
     remove_caddy_l4_block >/dev/null 2>&1 || true
     disable_caddy_l4_service >/dev/null 2>&1 || true
     if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
-    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; else rm -f -- "$target"; fi
-    if [[ "$dropin_existed" == true ]]; then
-      install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"
-      cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"
-    fi
+    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; elif [[ -n "$target" ]]; then rm -f -- "$target"; fi
+    if [[ "$dropin_existed" == true ]]; then install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"; cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"; fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart caddy >/dev/null 2>&1 || true
-    rm -rf -- "$snapshot_dir"
-    return 1
+    rm -rf -- "$snapshot_dir"; return 1
   fi
-  rm -f -- "$disabled_site"
+  [[ -z "$site_rollback" ]] || rm -f -- "$site_rollback"
+  [[ -z "$disabled_site" ]] || rm -f -- "$disabled_site"
   rm -rf -- "$snapshot_dir"
   success "已使用保存的配置重新启用 443 SNI 分流。"
   print_caddy_l4_state
@@ -1143,7 +1173,7 @@ disable_caddy_l4_service() {
 }
 
 configure_caddy_l4() {
-  local panel_domain panel_host panel_port reality_sni reality_host reality_port reality_backend
+  local mode panel_domain="" panel_host="" panel_port="" reality_sni="" reality_host="" reality_port="" reality_backend=""
   local site_state had_existing rollback_file snapshot_dir caddyfile_existed=false state_existed=false dropin_existed=false
   local runtime
 
@@ -1152,33 +1182,37 @@ configure_caddy_l4() {
     return 1
   fi
   printf '\n%s443 端口复用（caddy-l4 SNI 分流）%s\n' "$BOLD" "$RESET"
-  info "面板端口按 HTTP 处理；caddy-l4 会终止面板域名的 TLS，再将 HTTP 转发到 3x-ui。"
-  read -r -p "3x-ui 面板域名：" panel_domain
-  panel_domain="${panel_domain,,}"
-  is_valid_domain "$panel_domain" || { error "面板域名格式不正确。"; return 1; }
-  read -r -p "3x-ui 面板后端地址 [127.0.0.1]：" panel_host
-  panel_host="${panel_host:-127.0.0.1}"
-  panel_host="${panel_host#[}"; panel_host="${panel_host%]}"
-  is_valid_upstream_host "$panel_host" || { error "面板后端地址格式不正确。"; return 1; }
-  read -r -p "3x-ui 面板 HTTP 端口：" panel_port
-  is_valid_port "$panel_port" || { error "面板端口必须是 1-65535 之间的整数。"; return 1; }
-  read -r -p "Reality serverName（SNI）：" reality_sni
-  reality_sni="${reality_sni,,}"
-  is_valid_domain "$reality_sni" || { error "Reality SNI 必须是有效域名。"; return 1; }
-  [[ "$reality_sni" != "$panel_domain" ]] || { error "面板域名和 Reality SNI 不能相同。"; return 1; }
-  read -r -p "Xray Reality 后端地址 [127.0.0.1]：" reality_host
-  reality_host="${reality_host:-127.0.0.1}"
-  reality_host="${reality_host#[}"; reality_host="${reality_host%]}"
-  is_valid_upstream_host "$reality_host" || { error "Reality 后端地址格式不正确。"; return 1; }
-  read -r -p "Xray Reality 高位端口：" reality_port
-  is_valid_port "$reality_port" || { error "Reality 端口必须是 1-65535 之间的整数。"; return 1; }
-  reality_backend="$(format_upstream_host "$reality_host"):${reality_port}"
+  printf '请选择要启用的映射：\n'
+  printf '  1. 面板映射 + Reality 映射\n'
+  printf '  2. 仅 Reality 映射（适合 Realm 中转）\n'
+  printf '  3. 仅面板映射\n'
+  printf '  0. 返回\n'
+  read -r -p '请选择 [0-3]：' mode || return 0
+  [[ "$mode" == 0 ]] && return 0
+  [[ "$mode" =~ ^[123]$ ]] || { error '无效选项，请输入 0-3。'; return 1; }
 
-  if [[ "$reality_port" == 443 ]]; then
-    error "Reality 后端端口不能使用 443，否则会与 Caddy 冲突。"
-    return 1
+  if [[ "$mode" != 2 ]]; then
+    info "面板端口按 HTTP 处理；caddy-l4 会终止面板域名的 TLS，再将 HTTP 转发到 3x-ui。"
+    read -r -p "3x-ui 面板域名：" panel_domain; panel_domain="${panel_domain,,}"
+    is_valid_domain "$panel_domain" || { error "面板域名格式不正确。"; return 1; }
+    read -r -p "3x-ui 面板后端地址 [127.0.0.1]：" panel_host; panel_host="${panel_host:-127.0.0.1}"; panel_host="${panel_host#[}"; panel_host="${panel_host%]}"
+    is_valid_upstream_host "$panel_host" || { error "面板后端地址格式不正确。"; return 1; }
+    read -r -p "3x-ui 面板 HTTP 端口：" panel_port
+    is_valid_port "$panel_port" || { error "面板端口必须是 1-65535 之间的整数。"; return 1; }
   fi
-  if ! confirm_action "确认启用 443 SNI 分流：面板 ${panel_domain}，Reality ${reality_sni}？"; then
+  if [[ "$mode" != 3 ]]; then
+    read -r -p "Reality serverName（SNI）：" reality_sni; reality_sni="${reality_sni,,}"
+    is_valid_domain "$reality_sni" || { error "Reality SNI 必须是有效域名。"; return 1; }
+    [[ -z "$panel_domain" || "$reality_sni" != "$panel_domain" ]] || { error "面板域名和 Reality SNI 不能相同。"; return 1; }
+    read -r -p "Xray Reality 后端地址（可填写 Realm 本机监听地址）[127.0.0.1]：" reality_host
+    reality_host="${reality_host:-127.0.0.1}"; reality_host="${reality_host#[}"; reality_host="${reality_host%]}"
+    is_valid_upstream_host "$reality_host" || { error "Reality 后端地址格式不正确。"; return 1; }
+    read -r -p "Xray/Realm Reality 后端端口：" reality_port
+    is_valid_port "$reality_port" || { error "Reality 端口必须是 1-65535 之间的整数。"; return 1; }
+    [[ "$reality_port" != 443 ]] || { error "Reality 后端端口不能使用 443，否则会与 Caddy 冲突。"; return 1; }
+    reality_backend="$(format_upstream_host "$reality_host"):${reality_port}"
+  fi
+  if ! confirm_action "确认启用 443 SNI 分流（面板：${panel_domain:-未配置}；Reality：${reality_sni:-未配置}）？"; then
     info "已取消。"
     return 0
   fi
@@ -1188,65 +1222,54 @@ configure_caddy_l4() {
   if [[ -f "$CADDY_L4_STATE_FILE" ]]; then state_existed=true; cp -a "$CADDY_L4_STATE_FILE" "${snapshot_dir}/state.tsv" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
   if [[ -f "$CADDY_L4_SERVICE_DROPIN" ]]; then dropin_existed=true; cp -a "$CADDY_L4_SERVICE_DROPIN" "${snapshot_dir}/caddyctl-l4.conf" || { rm -rf -- "$snapshot_dir"; return 1; }; fi
   initialize_caddyfile || { rm -rf -- "$snapshot_dir"; return 1; }
-  printf 'P\t%s\t%s\t%s\nR\t%s\t%s\t%s\n' \
-    "$panel_domain" "$panel_host" "$panel_port" \
-    "$reality_sni" "$reality_host" "$reality_port" >"$CADDY_L4_STATE_FILE"
+  : >"$CADDY_L4_STATE_FILE"
+  [[ -z "$panel_domain" ]] || printf 'P\t%s\t%s\t%s\n' "$panel_domain" "$panel_host" "$panel_port" >>"$CADDY_L4_STATE_FILE"
+  [[ -z "$reality_sni" ]] || printf 'R\t%s\t%s\t%s\n' "$reality_sni" "$reality_host" "$reality_port" >>"$CADDY_L4_STATE_FILE"
   chmod 0600 "$CADDY_L4_STATE_FILE"
-  site_state="$(write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port")" || {
+  if [[ -n "$panel_domain" ]]; then
+    site_state="$(write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port")" || {
+      if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
+      if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
+      rm -rf -- "$snapshot_dir"; return 1
+    }
+    IFS=$'\t' read -r had_existing rollback_file <<< "$site_state"
+  else
+    had_existing=false
+  fi
+  if ! write_caddy_l4_block "$panel_domain" "${panel_domain:+$(format_upstream_host "$panel_host"):$panel_port}"; then
+    [[ -z "$panel_domain" ]] || restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
     if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
     if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
-    rm -rf -- "$snapshot_dir"
-    return 1
-  }
-  IFS=$'\t' read -r had_existing rollback_file <<< "$site_state"
-  if ! write_caddy_l4_block "$panel_domain" "$(format_upstream_host "$panel_host"):${panel_port}"; then
-    restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
-    if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
-    if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
-    rm -rf -- "$snapshot_dir"
-    return 1
+    rm -rf -- "$snapshot_dir"; return 1
   fi
   enable_caddy_l4_service || {
     remove_caddy_l4_block || true
-    restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
+    [[ -z "$panel_domain" ]] || restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
     if [[ "$dropin_existed" == true ]]; then cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"; else rm -f -- "$CADDY_L4_SERVICE_DROPIN"; fi
     if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
     if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
     systemctl daemon-reload >/dev/null 2>&1 || true
-    rm -rf -- "$snapshot_dir"
-    return 1
+    rm -rf -- "$snapshot_dir"; return 1
   }
   runtime="$(caddy_runtime_binary)"
-  if ! validate_caddy_config "$runtime"; then
-    error "caddy-l4 配置校验失败，正在恢复。"
+  if ! validate_caddy_config "$runtime" || ! systemctl restart caddy; then
+    error "caddy-l4 配置校验或 Caddy 重启失败，正在恢复。"
     disable_caddy_l4_service
     remove_caddy_l4_block || true
-    restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
-    if [[ "$dropin_existed" == true ]]; then install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"; cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"; fi
-    if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
-    if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    rm -rf -- "$snapshot_dir"
-    return 1
-  fi
-  if ! systemctl restart caddy; then
-    error "Caddy 重启失败，正在恢复未启用 caddy-l4 的配置。"
-    remove_caddy_l4_block || true
-    disable_caddy_l4_service
-    restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
+    [[ -z "$panel_domain" ]] || restore_caddy_l4_panel_site "$panel_domain" "$had_existing" "$rollback_file"
     if [[ "$dropin_existed" == true ]]; then install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"; cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"; fi
     if [[ "$state_existed" == true ]]; then cp -a "${snapshot_dir}/state.tsv" "$CADDY_L4_STATE_FILE"; else rm -f -- "$CADDY_L4_STATE_FILE"; fi
     if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart caddy >/dev/null 2>&1 || true
-    rm -rf -- "$snapshot_dir"
-    return 1
+    rm -rf -- "$snapshot_dir"; return 1
   fi
   rm -rf -- "$snapshot_dir"
   success "443 SNI 分流已启用。"
-  info "面板：https://${panel_domain}:443 -> caddy-l4 TLS 终止 -> HTTP ${panel_host}:${panel_port}"
-  info "Reality：SNI ${reality_sni}:443 -> ${reality_host}:${reality_port}"
-  warn "请确保 Xray 仅监听回环地址或受限内网地址，避免绕过 Caddy 直接暴露 Reality 端口。"
+  [[ -z "$panel_domain" ]] || info "面板：https://${panel_domain}:443 -> caddy-l4 TLS 终止 -> HTTP ${panel_host}:${panel_port}"
+  [[ -z "$reality_sni" ]] || info "Reality：SNI ${reality_sni}:443 -> ${reality_host}:${reality_port}"
+  [[ "$mode" != 2 ]] || info "当前为仅 Reality 映射模式，适合将后端端口填写为 Realm 的本机监听端口。"
+  warn "请确保 Xray/Realm 后端仅监听回环地址或受限内网地址，避免绕过 Caddy 直接暴露。"
 }
 
 disable_caddy_l4() {
@@ -1314,7 +1337,11 @@ caddy_l4_menu() {
       printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
       printf '操作菜单：\n'
       printf '  1. 管理 Reality 映射（添加 / 修改 / 删除）\n'
-      printf '  2. 修改面板入口（域名 / HTTP 后端）\n'
+      if state_has_panel; then
+        printf '  2. 修改面板入口（域名 / HTTP 后端）\n'
+      else
+        printf '  2. 配置面板映射（当前未启用）\n'
+      fi
       printf '  3. 校验并应用当前配置\n'
       printf '  4. 关闭 443 端口复用\n'
       printf '  0. 返回主菜单\n'
@@ -1322,7 +1349,7 @@ caddy_l4_menu() {
       read -r -p '请选择操作 [0-4]：' choice || return 0
       case "$choice" in
         1) manage_caddy_l4_reality ;;
-        2) edit_caddy_l4_panel; pause_menu '443 端口复用菜单' ;;
+        2) if state_has_panel; then edit_caddy_l4_panel; else add_caddy_l4_panel; fi; pause_menu '443 端口复用菜单' ;;
         3) apply_caddy_l4_state; pause_menu '443 端口复用菜单' ;;
         4) disable_caddy_l4; pause_menu '443 端口复用菜单' ;;
         0) return 0 ;;
@@ -1331,10 +1358,10 @@ caddy_l4_menu() {
     else
       if [[ -f "$CADDY_L4_STATE_FILE" ]]; then
         show_caddy_l4_saved_state
-        printf '\n说明：当前复用未使用，保存的面板和 Reality 映射可重新启用。\n'
+        printf '\n说明：当前复用未使用，保存的映射可重新启用。\n'
         printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
         printf '  1. 使用已保存配置重新启用\n'
-        printf '  2. 重新初始化面板入口和 Reality 映射\n'
+        printf '  2. 重新初始化映射\n'
         printf '  0. 返回主菜单\n'
         printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
         read -r -p '请选择操作 [0-2]：' choice || return 0
@@ -1346,10 +1373,10 @@ caddy_l4_menu() {
         esac
         continue
       fi
-      printf '\n说明：面板 HTTPS 和 Reality 共用公网 TCP 443。\n'
-      printf '      面板后端使用 HTTP，Reality 后端保留高位端口。\n'
+      printf '\n说明：可分别启用面板映射和 Reality 映射，共用公网 TCP 443。\n'
+      printf '      仅 Reality 映射适合搭配 Realm 做中转。\n'
       printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
-      printf '  1. 初始化面板入口和第一个 Reality 映射\n'
+      printf '  1. 初始化 443 映射\n'
       printf '  0. 返回主菜单\n'
       printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
       read -r -p '请选择操作 [0-1]：' choice || return 0
@@ -4464,6 +4491,15 @@ status_line() {
     "$enabled_color" "$enabled" "$RESET" \
     "$site_count"
   printf 'Caddy 版本：%s | CaddyCtl 版本：%s\n' "$version" "$MANAGER_VERSION"
+  if caddy_l4_enabled; then
+    printf '443 复用：已启用 | 面板映射：%s | Reality 映射：%s\n' \
+      "$(state_has_panel && printf '已启用' || printf '未启用')" "$(state_has_reality && printf '已启用' || printf '未启用')"
+  elif [[ -f "$CADDY_L4_STATE_FILE" ]]; then
+    printf '443 复用：未启用（配置已保存） | 面板：%s | Reality：%s\n' \
+      "$(state_has_panel && printf '已保存' || printf '未配置')" "$(state_has_reality && printf '已保存' || printf '未配置')"
+  else
+    printf '443 复用：未配置\n'
+  fi
 }
 
 draw_menu() {

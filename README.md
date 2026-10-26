@@ -102,7 +102,7 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 | `12` 检测 Caddy 后端服务监听与连通性 | 自动或手动检查后端服务的监听状态和 HTTP/HTTPS 连通性。 |
 | `13` 查看 Caddy 服务日志 | 查看 systemd 中的 Caddy 服务日志。 |
 | `14` 卸载 Caddy 或 CaddyCtl | 进入卸载子菜单。选项 `1`、`2` 保留配置；选项 `3` 会删除全部配置和证书。 |
-| `15` 443 端口复用 | 打开二级管理菜单，初始化面板入口，查看、添加、修改或删除多个 Reality SNI 映射，修改面板后端、校验应用或关闭复用。 |
+| `15` 443 端口复用 | 打开二级管理菜单，独立配置面板映射和 Reality SNI 映射，支持多个 Reality 后端、Realm 中转、修改面板后端、校验应用或关闭复用。 |
 | `0` 退出 | 退出管理菜单。 |
 
 网关设置会让你选择运行中的 Nginx Proxy Manager 容器，展示其各 Docker 网络的网关、容器 IP 和网络成员，并单独标出 Docker 系统默认 `bridge`（通常网关为 `172.17.0.1`）；也可从子菜单直接查看本机 TCP 监听表。Compose 默认网络与系统默认 `bridge` 是不同网络。新增或移除服务时，先选择 Docker 共享网络，再选择相应容器；网络列表显示网关和成员数，且会过滤 `host`、`none` 网络。连接或断开网络前会要求确认，移除 NPM 时会提醒其将无法通过该网络访问同网络服务。网络连接即时作用于当前容器；Compose 重建后如需保留，应在对应 Compose 配置中声明。
@@ -166,9 +166,9 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 ## 443 端口复用（3x-ui HTTP 面板 + VLESS Reality）
 
 如果 3x-ui 面板本身只提供 HTTP，而同一台服务器还要让 VLESS Reality 使用公网 TCP 443，
-可以在主菜单选择 `15`，再选择初始化。向导会优先从 Caddy 官方下载 API 下载当前 Linux 架构的预编译 Caddy，并验证其中包含
+可以在主菜单选择 `15`，再选择初始化。初始化时可选择“面板映射 + Reality 映射”、“仅 Reality 映射”或“仅面板映射”。向导会优先从 Caddy 官方下载 API 下载当前 Linux 架构的预编译 Caddy，并验证其中包含
 `github.com/mholt/caddy-l4`；只有预编译文件不可用时才会回退到本机 Go 构建。随后生成按 SNI
-分流的 Layer4 listener wrapper。后续可在二级菜单中查看、添加、修改或删除 Reality 映射，或者修改面板域名及 HTTP 后端；每个 SNI 对应一个后端地址和端口。面板域名的 TLS 会在 Caddy 中终止，再以普通 HTTP 访问 3x-ui，例如：
+分流的 Layer4 listener wrapper。后续可在二级菜单中查看、添加、修改或删除 Reality 映射，或者添加/修改面板域名及 HTTP 后端；面板和 Reality 映射彼此独立，每个 SNI 对应一个后端地址和端口。面板域名的 TLS 会在 Caddy 中终止，再以普通 HTTP 访问 3x-ui，例如：
 
 二级菜单顶部显示复用是否启用和 Caddy 服务状态，面板入口、Reality 映射列表与操作菜单分区展示。
 映射概览使用项目符号，只有修改或删除时才显示可选编号；输入 `0` 可取消选择。
@@ -197,7 +197,7 @@ reality-b.example:443 -> caddy-l4（保持原始 TLS） -> 127.0.0.1:25443
 入站端口。面板域名和所有 Reality `serverName` 必须不同，Reality 的 SNI 之间也不能重复；相同 SNI 无法区分多个后端。Xray 入站建议只监听 `127.0.0.1`。
 启用前请确保公网 TCP 443 未被其他服务占用。Caddy 自定义构建后，后续 Caddy 更新也应通过
 CaddyCtl 执行，并检查 `caddyctl` 日志。证书申请可继续使用 80 端口 HTTP-01，或改用 DNS-01；
-如果使用 TLS-ALPN-01，需要额外配置 Layer4 放行 ACME 流量。
+如果使用 TLS-ALPN-01，需要额外配置 Layer4 放行 ACME 流量。仅 Reality 模式下不创建面板站点，适合入口机使用 Realm：将 Reality 映射后端填写为 Realm 在本机监听的地址和端口，由 Realm 再转发到远端 Xray。Realm 或 Xray 后端不能再直接占用公网 443。
 
 ## Docker 后端建议
 
