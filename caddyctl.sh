@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.53"
+readonly MANAGER_VERSION="3.3.54"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -54,7 +54,7 @@ error() { printf '%s[错误]%s %s\n' "$RED" "$RESET" "$*" >&2; }
 
 pause_menu() {
   printf '\n'
-  read -r -p "按 Enter 键返回主菜单..." _ || true
+  read -r -p "按 Enter 键返回${1:-主菜单}..." _ || true
 }
 
 confirm_action() {
@@ -768,33 +768,80 @@ apply_caddy_l4_state() {
 }
 
 show_caddy_l4_state() {
-  local row type name host port
+  local type name host port count
   if ! caddy_l4_enabled; then
     warn "443 SNI 分流当前未启用。"
     return 0
   fi
-  printf '\n面板后端：\n'
+  if [[ ! -r "$CADDY_L4_STATE_FILE" ]]; then
+    warn "未找到复用状态文件，请检查 $CADDY_L4_STATE_FILE。"
+    return 1
+  fi
+  printf '\n面板入口（HTTPS → HTTP）：\n'
   while IFS=$'\t' read -r type name host port; do
-    [[ "$type" == P ]] && printf '  https://%s -> http://%s:%s\n' "$name" "$host" "$port"
+    [[ "$type" == P ]] && printf '  https://%s -> http://%s:%s\n' "$name" "$(format_upstream_host "$host")" "$port"
   done <"$CADDY_L4_STATE_FILE"
-  printf '\nReality SNI 映射：\n'
-  local index=0
+  count="$(awk -F '\t' '$1 == "R" {n++} END {print n+0}' "$CADDY_L4_STATE_FILE")"
+  printf '\nReality SNI 映射（%s 个，公网 TCP 443）：\n' "$count"
   while IFS=$'\t' read -r type name host port; do
     [[ "$type" == R ]] || continue
-    ((index+=1))
-    printf '  %d. %s -> %s:%s\n' "$index" "$name" "$host" "$port"
+    printf '  - %s -> %s:%s\n' "$name" "$(format_upstream_host "$host")" "$port"
   done <"$CADDY_L4_STATE_FILE"
-  ((index > 0)) || warn "尚未配置 Reality 入站映射。"
+  if ((count == 0)); then
+    printf '  暂无映射，可在“管理 Reality 映射”中添加。\n'
+  fi
+}
+
+draw_caddy_l4_header() {
+  local title="$1" active
+  if [[ -t 1 ]]; then clear 2>/dev/null || true; fi
+  printf '%s============================================%s\n' "$BLUE" "$RESET"
+  printf '%s  %s%s\n' "$BOLD" "$title" "$RESET"
+  printf '%s============================================%s\n' "$BLUE" "$RESET"
+  active="$(service_value is-active)"
+  case "$active" in
+    active) active='运行中' ;;
+    inactive) active='未运行' ;;
+    failed) active='启动失败' ;;
+    *) active="${active:-未知}" ;;
+  esac
+  if caddy_l4_enabled; then
+    printf '443 复用：已启用 | Caddy：%s\n' "$active"
+  else
+    printf '443 复用：未启用 | Caddy：%s\n' "$active"
+  fi
 }
 
 manage_caddy_l4_reality() {
-  local action sni host port tmp existing_type existing_sni existing_host existing_port choice index=0 state_backup
+  local action
+  [[ -f "$CADDY_L4_STATE_FILE" ]] || { error "请先初始化 443 端口复用。"; return 1; }
+  while true; do
+    draw_caddy_l4_header 'Reality 映射管理'
+    show_caddy_l4_state
+    printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+    printf '  1. 添加 Reality 映射\n'
+    printf '  2. 修改 Reality 映射\n'
+    printf '  3. 删除 Reality 映射\n'
+    printf '  0. 返回 443 端口复用菜单\n'
+    printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+    printf '提示：SNI 填写 Xray Reality 的 serverName。\n'
+    read -r -p '请选择操作 [0-3]：' action || return 0
+    case "$action" in
+      1|2|3) edit_caddy_l4_reality "$action"; pause_menu 'Reality 映射菜单' ;;
+      0) return 0 ;;
+      *) error '无效选项，请输入 0-3。'; pause_menu 'Reality 映射菜单' ;;
+    esac
+  done
+}
+
+edit_caddy_l4_reality() {
+  local action="$1" sni host port tmp existing_type existing_sni existing_host existing_port choice index=0 state_backup
   local -a rows=()
   [[ -f "$CADDY_L4_STATE_FILE" ]] || { error "请先初始化 443 端口复用。"; return 1; }
-  printf '  1. 添加映射\n  2. 修改映射\n  3. 删除映射\n  0. 返回\n'
-  read -r -p '请选择 [0-3]：' action || return 0
+  printf '\n'
   case "$action" in
     1)
+      printf '%s添加 Reality 映射%s\n' "$BOLD" "$RESET"
       read -r -p 'Reality serverName（SNI）：' sni
       sni="${sni,,}"
       is_valid_domain "$sni" || { error 'SNI 域名格式不正确。'; return 1; }
@@ -814,13 +861,16 @@ manage_caddy_l4_reality() {
       rm -f "$state_backup"
       ;;
     2|3)
+      [[ "$action" == 2 ]] && printf '选择要修改的映射：\n' || printf '选择要删除的映射：\n'
       while IFS=$'\t' read -r existing_type existing_sni existing_host existing_port; do
         [[ "$existing_type" == R ]] || continue
         ((index+=1)); rows+=("$existing_sni|$existing_host|$existing_port")
-        printf '  %d. %s -> %s:%s\n' "$index" "$existing_sni" "$existing_host" "$existing_port"
+        printf '  [%d] %s -> %s:%s\n' "$index" "$existing_sni" "$(format_upstream_host "$existing_host")" "$existing_port"
       done <"$CADDY_L4_STATE_FILE"
-      ((${#rows[@]} > 0)) || { warn '没有可删除的 Reality 映射。'; return 0; }
-      read -r -p "选择管理项 [1-${#rows[@]}]：" choice
+      ((${#rows[@]} > 0)) || { warn '暂无可管理的 Reality 映射，请先添加。'; return 0; }
+      printf '  [0] 取消\n'
+      read -r -p "请选择映射编号 [0-${#rows[@]}]：" choice || return 0
+      [[ "$choice" == 0 ]] && return 0
       [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= ${#rows[@]})) || { error '无效编号。'; return 1; }
       IFS='|' read -r sni host port <<<"${rows[$((choice-1))]}"
       if [[ "$action" == 2 ]]; then
@@ -858,6 +908,8 @@ manage_caddy_l4_reality() {
 edit_caddy_l4_panel() {
   local old_domain host port domain tmp state_backup
   IFS=$'\t' read -r old_domain host port <<<"$(read_caddy_l4_panel)"
+  printf '\n%s修改面板入口%s\n' "$BOLD" "$RESET"
+  info '直接按 Enter 保留当前值；后端端口填写 3x-ui 的 HTTP 端口。'
   read -r -p "面板域名 [${old_domain}]：" domain; domain="${domain:-$old_domain}"; domain="${domain,,}"
   is_valid_domain "$domain" || { error '域名格式不正确。'; return 1; }
   read -r -p "面板 HTTP 地址 [${host}]：" host; host="${host:-$(awk -F '\t' '$1=="P"{print $3;exit}' "$CADDY_L4_STATE_FILE")}"; host="${host#[}"; host="${host%]}"
@@ -1146,33 +1198,38 @@ disable_caddy_l4() {
 caddy_l4_menu() {
   local choice
   while true; do
-    printf '\n%s443 端口复用管理%s\n' "$BOLD" "$RESET"
+    draw_caddy_l4_header '443 端口复用管理'
     if caddy_l4_enabled; then
-      printf '状态：已启用\n'
       show_caddy_l4_state
-      printf '  1. 管理 Reality SNI 映射（添加/修改/删除）\n'
-      printf '  2. 修改面板域名或 HTTP 后端\n'
+      printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+      printf '操作菜单：\n'
+      printf '  1. 管理 Reality 映射（添加 / 修改 / 删除）\n'
+      printf '  2. 修改面板入口（域名 / HTTP 后端）\n'
       printf '  3. 校验并应用当前配置\n'
       printf '  4. 关闭 443 端口复用\n'
-      printf '  0. 返回\n'
-      read -r -p '请选择 [0-4]：' choice || return 0
+      printf '  0. 返回主菜单\n'
+      printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+      read -r -p '请选择操作 [0-4]：' choice || return 0
       case "$choice" in
-        1) manage_caddy_l4_reality; pause_menu ;;
-        2) edit_caddy_l4_panel; pause_menu ;;
-        3) apply_caddy_l4_state; pause_menu ;;
-        4) disable_caddy_l4; pause_menu ;;
+        1) manage_caddy_l4_reality ;;
+        2) edit_caddy_l4_panel; pause_menu '443 端口复用菜单' ;;
+        3) apply_caddy_l4_state; pause_menu '443 端口复用菜单' ;;
+        4) disable_caddy_l4; pause_menu '443 端口复用菜单' ;;
         0) return 0 ;;
-        *) error '无效选项。'; pause_menu ;;
+        *) error '无效选项，请输入 0-4。'; pause_menu '443 端口复用菜单' ;;
       esac
     else
-      printf '状态：未启用\n'
+      printf '\n说明：面板 HTTPS 和 Reality 共用公网 TCP 443。\n'
+      printf '      面板后端使用 HTTP，Reality 后端保留高位端口。\n'
+      printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
       printf '  1. 初始化面板入口和第一个 Reality 映射\n'
-      printf '  0. 返回\n'
-      read -r -p '请选择 [0-1]：' choice || return 0
+      printf '  0. 返回主菜单\n'
+      printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+      read -r -p '请选择操作 [0-1]：' choice || return 0
       case "$choice" in
-        1) configure_caddy_l4; pause_menu ;;
+        1) configure_caddy_l4; pause_menu '443 端口复用菜单' ;;
         0) return 0 ;;
-        *) error '无效选项。'; pause_menu ;;
+        *) error '无效选项，请输入 0-1。'; pause_menu '443 端口复用菜单' ;;
       esac
     fi
   done
@@ -4365,7 +4422,7 @@ main_menu() {
       12) diagnose_upstream; pause_menu ;;
       13) show_logs; pause_menu ;;
       14) uninstall_menu; pause_menu ;;
-      15) caddy_l4_menu; pause_menu ;;
+      15) caddy_l4_menu ;;
       0) exit 0 ;;
       *) warn "无效选项：$choice"; pause_menu ;;
     esac

@@ -170,6 +170,11 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 `github.com/mholt/caddy-l4`；只有预编译文件不可用时才会回退到本机 Go 构建。随后生成按 SNI
 分流的 Layer4 listener wrapper。后续可在二级菜单中查看、添加、修改或删除 Reality 映射，或者修改面板域名及 HTTP 后端；每个 SNI 对应一个后端地址和端口。面板域名的 TLS 会在 Caddy 中终止，再以普通 HTTP 访问 3x-ui，例如：
 
+二级菜单顶部显示复用是否启用和 Caddy 服务状态，面板入口、Reality 映射列表与操作菜单分区展示。
+映射概览使用项目符号，只有修改或删除时才显示可选编号；输入 `0` 可取消选择。
+进入“管理 Reality 映射”后可以连续添加、修改、删除，操作完成后返回该映射菜单。
+各级菜单的 `0` 返回上一级，返回时无需额外按 Enter；修改面板时直接回车保留当前字段。
+
 预编译下载只需少量空间。源码构建备用流程会清理旧版本可能遗留的 Go 模块、编译缓存和 `/tmp/go-build*` 临时目录，并自动选择可用空间最大的本地目录；Go 的模块缓存、编译缓存和临时编译目录都会放在该目录，不依赖 `/tmp` 必须有大容量。源码构建时请至少在构建目录所在文件系统预留约 1.5 GiB 可用空间。普通 Caddy 安装不需要 Go，只有初始化 443 端口复用时才执行这一步。
 
 如需固定插件版本或使用镜像，可设置 `CADDYCTL_L4_PLUGIN_VERSION` 和 `CADDYCTL_L4_PREBUILT_URL`；下载地址需要兼容 Caddy 下载 API 的 `os`、`arch` 和 `p` 查询参数。
