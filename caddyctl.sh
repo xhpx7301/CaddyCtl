@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.61"
+readonly MANAGER_VERSION="3.3.62"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -30,8 +30,8 @@ readonly CADDY_L4_MARKER_END="# END CADDYCTL LAYER4"
 readonly CADDY_L4_MIN_FREE_KB=1572864
 readonly CADDY_L4_PREBUILT_MIN_FREE_KB=131072
 readonly CADDY_L4_PLUGIN_VERSION="${CADDYCTL_L4_PLUGIN_VERSION:-v0.1.2}"
-readonly CADDY_L4_GO_VERSION="${CADDYCTL_GO_VERSION:-1.24.6}"
-readonly CADDY_L4_MIN_GO_MINOR=24
+readonly CADDY_L4_GO_VERSION="${CADDYCTL_GO_VERSION:-1.26.0}"
+readonly CADDY_L4_MIN_GO_MINOR=26
 readonly CADDY_L4_PREBUILT_URL="${CADDYCTL_L4_PREBUILT_URL:-https://caddyserver.com/api/download}"
 readonly CADDY_GITHUB_API="https://api.github.com/repos/caddyserver/caddy/releases/latest"
 readonly CADDY_GITHUB_RELEASE="https://github.com/caddyserver/caddy/releases/download"
