@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.58"
+readonly MANAGER_VERSION="3.3.59"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1777,7 +1777,14 @@ reload_validated_config() {
   fi
 
   if systemctl is-active --quiet caddy; then
-    systemctl reload caddy
+    # The package unit's default ExecReload may call /usr/bin/caddy. When
+    # caddy-l4 is active that binary cannot parse the layer4 module, so use
+    # the service restart path and let the systemd drop-in start caddy-l4.
+    if caddy_l4_enabled; then
+      systemctl restart caddy
+    else
+      systemctl reload caddy
+    fi
   else
     systemctl start caddy
   fi
