@@ -166,10 +166,13 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 ## 443 端口复用（3x-ui HTTP 面板 + VLESS Reality）
 
 如果 3x-ui 面板本身只提供 HTTP，而同一台服务器还要让 VLESS Reality 使用公网 TCP 443，
-可以在主菜单选择 `15`，再选择初始化。向导会构建带 `github.com/mholt/caddy-l4` 的 Caddy，生成按 SNI
+可以在主菜单选择 `15`，再选择初始化。向导会优先从 Caddy 官方下载 API 下载当前 Linux 架构的预编译 Caddy，并验证其中包含
+`github.com/mholt/caddy-l4`；只有预编译文件不可用时才会回退到本机 Go 构建。随后生成按 SNI
 分流的 Layer4 listener wrapper。后续可在二级菜单中查看、添加、修改或删除 Reality 映射，或者修改面板域名及 HTTP 后端；每个 SNI 对应一个后端地址和端口。面板域名的 TLS 会在 Caddy 中终止，再以普通 HTTP 访问 3x-ui，例如：
 
-构建前会清理旧版本可能遗留的 Go 模块、编译缓存和 `/tmp/go-build*` 临时目录，并自动选择可用空间最大的本地目录作为构建目录；Go 的模块缓存、编译缓存和临时编译目录都会放在该目录，不依赖 `/tmp` 必须有大容量。请至少在构建目录所在文件系统预留约 1.5 GiB 可用空间；构建完成、失败或中断后，临时目录都会删除。普通 Caddy 安装不需要 Go，只有初始化 443 端口复用时才执行这一步。
+预编译下载只需少量空间。源码构建备用流程会清理旧版本可能遗留的 Go 模块、编译缓存和 `/tmp/go-build*` 临时目录，并自动选择可用空间最大的本地目录；Go 的模块缓存、编译缓存和临时编译目录都会放在该目录，不依赖 `/tmp` 必须有大容量。源码构建时请至少在构建目录所在文件系统预留约 1.5 GiB 可用空间。普通 Caddy 安装不需要 Go，只有初始化 443 端口复用时才执行这一步。
+
+如需固定插件版本或使用镜像，可设置 `CADDYCTL_L4_PLUGIN_VERSION` 和 `CADDYCTL_L4_PREBUILT_URL`；下载地址需要兼容 Caddy 下载 API 的 `os`、`arch` 和 `p` 查询参数。
 
 ```text
 面板域名:443 -> caddy-l4（Caddy 终止 TLS） -> http://127.0.0.1:20534

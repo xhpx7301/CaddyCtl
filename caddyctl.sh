@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.51"
+readonly MANAGER_VERSION="3.3.52"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -27,6 +27,9 @@ readonly CADDY_L4_STATE_FILE="/etc/caddy/caddyctl-layer4.tsv"
 readonly CADDY_L4_MARKER_BEGIN="# BEGIN CADDYCTL LAYER4"
 readonly CADDY_L4_MARKER_END="# END CADDYCTL LAYER4"
 readonly CADDY_L4_MIN_FREE_KB=1572864
+readonly CADDY_L4_PREBUILT_MIN_FREE_KB=131072
+readonly CADDY_L4_PLUGIN_VERSION="${CADDYCTL_L4_PLUGIN_VERSION:-v0.1.2}"
+readonly CADDY_L4_PREBUILT_URL="${CADDYCTL_L4_PREBUILT_URL:-https://caddyserver.com/api/download}"
 readonly CADDY_GITHUB_API="https://api.github.com/repos/caddyserver/caddy/releases/latest"
 readonly CADDY_GITHUB_RELEASE="https://github.com/caddyserver/caddy/releases/download"
 readonly IMPORT_BEGIN="# BEGIN CADDYCTL SITES"
@@ -144,6 +147,72 @@ cleanup_caddy_l4_build_cache() {
     [[ -e "$path" ]] || continue
     rm -rf -- "$path"
   done
+}
+
+caddy_l4_arch() {
+  case "$(uname -m 2>/dev/null || true)" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    armv7l|armv7) printf 'armv7\n' ;;
+    armv6l|armv6) printf 'armv6\n' ;;
+    ppc64le) printf 'ppc64le\n' ;;
+    riscv64) printf 'riscv64\n' ;;
+    s390x) printf 's390x\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+caddy_l4_prebuilt_url() {
+  local architecture="$1" separator='?'
+  [[ "$CADDY_L4_PREBUILT_URL" == *\?* ]] && separator='&'
+  printf '%s%sos=linux&arch=%s&p=github.com/mholt/caddy-l4%%40%s\n' \
+    "$CADDY_L4_PREBUILT_URL" "$separator" "$architecture" "$CADDY_L4_PLUGIN_VERSION"
+}
+
+install_caddy_l4_prebuilt() {
+  local architecture build_parent download_dir temp_binary download_url free
+
+  architecture="$(caddy_l4_arch)" || {
+    warn "当前 CPU 架构没有匹配的预编译 caddy-l4，准备使用 Go 构建。"
+    return 1
+  }
+  build_parent="$(choose_caddy_l4_build_parent)" || {
+    warn "找不到预编译二进制下载目录，准备使用 Go 构建。"
+    return 1
+  }
+  free="$(filesystem_free_kb "$build_parent")"
+  if [[ ! "$free" =~ ^[0-9]+$ ]] || (( free < CADDY_L4_PREBUILT_MIN_FREE_KB )); then
+    warn "预编译二进制下载目录可用空间不足，准备使用 Go 构建。"
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+    warn "未找到 curl 或 wget，准备使用 Go 构建。"
+    return 1
+  fi
+
+  download_dir="$(mktemp -d "${build_parent}/caddyctl-l4-download.XXXXXX")" || return 1
+  temp_binary="${download_dir}/caddy-l4"
+  download_url="$(caddy_l4_prebuilt_url "$architecture")"
+  info "正在下载预编译 caddy-l4（${architecture}，插件 ${CADDY_L4_PLUGIN_VERSION}）..."
+  if ! download_url_to_file "$download_url" "$temp_binary"; then
+    rm -rf -- "$download_dir"
+    warn "预编译 caddy-l4 下载失败，准备使用 Go 构建。"
+    return 1
+  fi
+  chmod 0755 "$temp_binary"
+  if ! "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
+    rm -rf -- "$download_dir"
+    warn "预编译文件未包含 layer4 模块，准备使用 Go 构建。"
+    return 1
+  fi
+  if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
+    rm -rf -- "$download_dir"
+    error "预编译 caddy-l4 安装失败。"
+    return 1
+  fi
+  rm -rf -- "$download_dir"
+  success "已安装预编译 caddy-l4。"
+  return 0
 }
 
 detect_package_manager() {
@@ -753,6 +822,10 @@ install_caddy_l4_binary() {
       && "$CADDY_L4_BINARY" list-modules 2>/dev/null | grep -Fq 'layer4'; then
     return 0
   fi
+  if install_caddy_l4_prebuilt; then
+    return 0
+  fi
+  warn "预编译 caddy-l4 不可用，改用 Go 源码构建；这可能需要较多磁盘空间。"
   cleanup_caddy_l4_build_cache
   build_parent="$(choose_caddy_l4_build_parent)" || {
     error "找不到可用的本地构建目录。"
