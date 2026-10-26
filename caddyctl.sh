@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.60"
+readonly MANAGER_VERSION="3.3.61"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -30,6 +30,8 @@ readonly CADDY_L4_MARKER_END="# END CADDYCTL LAYER4"
 readonly CADDY_L4_MIN_FREE_KB=1572864
 readonly CADDY_L4_PREBUILT_MIN_FREE_KB=131072
 readonly CADDY_L4_PLUGIN_VERSION="${CADDYCTL_L4_PLUGIN_VERSION:-v0.1.2}"
+readonly CADDY_L4_GO_VERSION="${CADDYCTL_GO_VERSION:-1.24.6}"
+readonly CADDY_L4_MIN_GO_MINOR=24
 readonly CADDY_L4_PREBUILT_URL="${CADDYCTL_L4_PREBUILT_URL:-https://caddyserver.com/api/download}"
 readonly CADDY_GITHUB_API="https://api.github.com/repos/caddyserver/caddy/releases/latest"
 readonly CADDY_GITHUB_RELEASE="https://github.com/caddyserver/caddy/releases/download"
@@ -164,21 +166,27 @@ caddy_l4_arch() {
 }
 
 caddy_l4_prebuilt_url() {
-  local architecture="$1" separator='?'
+  local architecture="$1" plugin_version="${2:-$CADDY_L4_PLUGIN_VERSION}" separator='?' plugin_query
   [[ "$CADDY_L4_PREBUILT_URL" == *\?* ]] && separator='&'
-  printf '%s%sos=linux&arch=%s&p=github.com/mholt/caddy-l4%%40%s\n' \
-    "$CADDY_L4_PREBUILT_URL" "$separator" "$architecture" "$CADDY_L4_PLUGIN_VERSION"
+  if [[ -n "$plugin_version" ]]; then
+    plugin_query="github.com/mholt/caddy-l4%40${plugin_version}"
+  else
+    plugin_query='github.com/mholt/caddy-l4'
+  fi
+  printf '%s%sos=linux&arch=%s&p=%s\n' \
+    "$CADDY_L4_PREBUILT_URL" "$separator" "$architecture" "$plugin_query"
 }
 
 install_caddy_l4_prebuilt() {
-  local architecture build_parent download_dir temp_binary download_url free
+  local architecture build_parent download_dir temp_binary download_url free plugin_version
+  local -a plugin_versions=("$CADDY_L4_PLUGIN_VERSION" "" "master")
 
   architecture="$(caddy_l4_arch)" || {
     warn "当前 CPU 架构没有匹配的预编译 caddy-l4，准备使用 Go 构建。"
     return 1
   }
   build_parent="$(choose_caddy_l4_build_parent)" || {
-    warn "找不到预编译二进制下载目录，准备使用 Go 构建。"
+    warn "找不到预编译 caddy-l4 下载目录，准备使用 Go 构建。"
     return 1
   }
   free="$(filesystem_free_kb "$build_parent")"
@@ -191,29 +199,30 @@ install_caddy_l4_prebuilt() {
     return 1
   fi
 
-  download_dir="$(mktemp -d "${build_parent}/caddyctl-l4-download.XXXXXX")" || return 1
-  temp_binary="${download_dir}/caddy-l4"
-  download_url="$(caddy_l4_prebuilt_url "$architecture")"
-  info "正在下载预编译 caddy-l4（${architecture}，插件 ${CADDY_L4_PLUGIN_VERSION}）..."
-  if ! download_url_to_file "$download_url" "$temp_binary"; then
+  for plugin_version in "${plugin_versions[@]}"; do
+    download_dir="$(mktemp -d "${build_parent}/caddyctl-l4-download.XXXXXX")" || return 1
+    temp_binary="${download_dir}/caddy-l4"
+    download_url="$(caddy_l4_prebuilt_url "$architecture" "$plugin_version")"
+    info "正在下载预编译 caddy-l4（${architecture}，插件 ${plugin_version:-默认版本}）..."
+    if download_url_to_file "$download_url" "$temp_binary"; then
+      chmod 0755 "$temp_binary"
+      if "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
+        if install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
+          rm -rf -- "$download_dir"
+          success "已安装预编译 caddy-l4。"
+          return 0
+        fi
+        error "预编译 caddy-l4 安装失败。"
+      else
+        warn "预编译文件未包含 layer4 模块，尝试其他插件参数。"
+      fi
+    else
+      warn "预编译 caddy-l4 下载失败，尝试其他插件参数。"
+    fi
     rm -rf -- "$download_dir"
-    warn "预编译 caddy-l4 下载失败，准备使用 Go 构建。"
-    return 1
-  fi
-  chmod 0755 "$temp_binary"
-  if ! "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
-    rm -rf -- "$download_dir"
-    warn "预编译文件未包含 layer4 模块，准备使用 Go 构建。"
-    return 1
-  fi
-  if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
-    rm -rf -- "$download_dir"
-    error "预编译 caddy-l4 安装失败。"
-    return 1
-  fi
-  rm -rf -- "$download_dir"
-  success "已安装预编译 caddy-l4。"
-  return 0
+  done
+  warn "所有预编译 caddy-l4 方案均不可用，准备使用 Go 构建。"
+  return 1
 }
 
 detect_package_manager() {
@@ -1073,8 +1082,60 @@ enable_saved_caddy_l4() {
   print_caddy_l4_state
 }
 
+caddy_l4_go_supported() {
+  local version major minor
+  command -v go >/dev/null 2>&1 || return 1
+  version="$(go version 2>/dev/null || true)"
+  [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] || return 1
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  (( major > 1 || (major == 1 && minor >= CADDY_L4_MIN_GO_MINOR) ))
+}
+
+caddy_l4_go_arch() {
+  case "$(uname -m 2>/dev/null || true)" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    armv7l|armv7|armv6l|armv6) printf 'armv6l\n' ;;
+    ppc64le) printf 'ppc64le\n' ;;
+    riscv64) printf 'riscv64\n' ;;
+    s390x) printf 's390x\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+prepare_caddy_l4_go() {
+  local build_dir="$1" go_arch archive go_root go_bin download_url
+  if caddy_l4_go_supported; then
+    command -v go
+    return 0
+  fi
+  if command -v go >/dev/null 2>&1; then
+    warn "检测到 Go 版本过旧（$(go version 2>/dev/null || printf '未知')），不使用系统 Go。" >&2
+  else
+    info "未检测到可用的 Go，准备下载临时 Go 工具链。" >&2
+  fi
+  go_arch="$(caddy_l4_go_arch)" || { error "当前 CPU 架构没有匹配的 Go 工具链。"; return 1; }
+  command -v tar >/dev/null 2>&1 || { error "未找到 tar，无法解压临时 Go 工具链。"; return 1; }
+  archive="${build_dir}/go${CADDY_L4_GO_VERSION}.linux-${go_arch}.tar.gz"
+  go_root="${build_dir}/go"
+  download_url="https://go.dev/dl/go${CADDY_L4_GO_VERSION}.linux-${go_arch}.tar.gz"
+  info "正在下载临时 Go ${CADDY_L4_GO_VERSION}（不会替换系统 Go）..." >&2
+  download_url_to_file "$download_url" "$archive" || {
+    error "临时 Go 工具链下载失败，请检查网络或设置 CADDYCTL_GO_VERSION。"
+    return 1
+  }
+  tar -xzf "$archive" -C "$build_dir" || {
+    error "临时 Go 工具链解压失败。"
+    return 1
+  }
+  go_bin="${go_root}/bin/go"
+  [[ -x "$go_bin" ]] || { error "临时 Go 工具链文件不完整。"; return 1; }
+  printf '%s\n' "$go_bin"
+}
+
 install_caddy_l4_binary() {
-  local package_manager build_parent build_dir temp_binary xcaddy_path
+  local build_parent build_dir temp_binary xcaddy_path go_bin go_bin_dir
 
   if [[ -x "$CADDY_L4_BINARY" ]] \
       && "$CADDY_L4_BINARY" list-modules 2>/dev/null | grep -Fq 'layer4'; then
@@ -1083,85 +1144,50 @@ install_caddy_l4_binary() {
   if install_caddy_l4_prebuilt; then
     return 0
   fi
-  warn "预编译 caddy-l4 不可用，改用 Go 源码构建；这可能需要较多磁盘空间。"
+  warn "预编译 caddy-l4 不可用，准备使用兼容 Go 工具链构建；这可能需要较多磁盘空间。"
   cleanup_caddy_l4_build_cache
   build_parent="$(choose_caddy_l4_build_parent)" || {
     error "找不到可用的本地构建目录。"
     return 1
   }
   check_caddy_l4_build_space "$build_parent" || return 1
-  if ! command -v go >/dev/null 2>&1; then
-    package_manager="$(detect_package_manager)"
-    case "$package_manager" in
-      apt)
-        if ! DEBIAN_FRONTEND=noninteractive apt-get update \
-            || ! DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go; then
-          apt-get clean >/dev/null 2>&1 || true
-          rm -rf /var/lib/apt/lists/*
-          return 1
-        fi
-        apt-get clean >/dev/null 2>&1 || true
-        rm -rf /var/lib/apt/lists/*
-        ;;
-      dnf) dnf install -y golang || return 1 ;;
-      *) error "未找到 Go，无法构建带 caddy-l4 的 Caddy。"; return 1 ;;
-    esac
-  fi
-  if ! command -v go >/dev/null 2>&1; then
-    error "Go 安装后仍不可用，无法构建带 caddy-l4 的 Caddy。"
-    return 1
-  fi
   build_dir="$(mktemp -d "${build_parent}/caddyctl-l4-build.XXXXXX")" || return 1
   trap 'rm -rf -- "$build_dir"; exit 130' INT TERM
+  go_bin="$(prepare_caddy_l4_go "$build_dir")" || {
+    rm -rf -- "$build_dir"
+    trap - INT TERM
+    return 1
+  }
+  go_bin_dir="$(dirname "$go_bin")"
   temp_binary="${build_dir}/caddy-l4"
   xcaddy_path="$(command -v xcaddy 2>/dev/null || true)"
   if [[ -z "$xcaddy_path" ]]; then
     info "正在临时构建 xcaddy（构建缓存仅保存在临时目录）..."
     mkdir -p "$build_dir/tmp" "$build_dir/gotmp" || {
-      rm -rf -- "$build_dir"
-      trap - INT TERM
-      error "无法创建 Go 临时目录。"
-      return 1
+      rm -rf -- "$build_dir"; trap - INT TERM; error "无法创建 Go 临时目录。"; return 1
     }
-    if ! env TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" GOBIN="${build_dir}/bin" \
-      go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest; then
-      rm -rf -- "$build_dir"
-      trap - INT TERM
-      error "xcaddy 构建失败。"
-      return 1
+    if ! env PATH="${go_bin_dir}:$PATH" GOTOOLCHAIN=local TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" GOBIN="${build_dir}/bin" \
+      "$go_bin" install github.com/caddyserver/xcaddy/cmd/xcaddy@latest; then
+      rm -rf -- "$build_dir"; trap - INT TERM; error "xcaddy 构建失败。"; return 1
     fi
     xcaddy_path="${build_dir}/bin/xcaddy"
   fi
   if [[ ! -x "$xcaddy_path" ]]; then
-    rm -rf -- "$build_dir"
-    trap - INT TERM
-    error "xcaddy 不可用。"
-    return 1
+    rm -rf -- "$build_dir"; trap - INT TERM; error "xcaddy 不可用。"; return 1
   fi
   info "正在构建带 caddy-l4 的 Caddy，这可能需要几分钟..."
   mkdir -p "$build_dir/tmp" "$build_dir/gotmp" || {
-    rm -rf -- "$build_dir"
-    trap - INT TERM
-    error "无法创建 Go 临时目录。"
-    return 1
+    rm -rf -- "$build_dir"; trap - INT TERM; error "无法创建 Go 临时目录。"; return 1
   }
-  if ! env TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" \
+  if ! env PATH="${go_bin_dir}:$PATH" GOTOOLCHAIN=local TMPDIR="$build_dir/tmp" GOTMPDIR="$build_dir/gotmp" GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" \
       "$xcaddy_path" build --output "$temp_binary" --with github.com/mholt/caddy-l4; then
-    rm -rf -- "$build_dir"
-    trap - INT TERM
-    error "caddy-l4 构建失败。"
-    return 1
+    rm -rf -- "$build_dir"; trap - INT TERM; error "caddy-l4 构建失败。"; return 1
   fi
   if ! "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
-    rm -rf -- "$build_dir"
-    trap - INT TERM
-    error "构建结果未包含 layer4 模块。"
-    return 1
+    rm -rf -- "$build_dir"; trap - INT TERM; error "构建结果未包含 layer4 模块。"; return 1
   fi
   if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
-    rm -rf -- "$build_dir"
-    trap - INT TERM
-    return 1
+    rm -rf -- "$build_dir"; trap - INT TERM; return 1
   fi
   rm -rf -- "$build_dir"
   trap - INT TERM
