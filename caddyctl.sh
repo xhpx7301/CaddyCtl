@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.64"
+readonly MANAGER_VERSION="3.3.65"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -22,6 +22,7 @@ readonly LISTENER_COMMAND="/usr/local/bin/pl"
 readonly LEGACY_LISTENER_COMMAND="/usr/local/bin/caddyctl-listen"
 readonly LEGACY_MANAGER_COMMAND="/usr/local/bin/caddy"
 readonly CADDY_L4_BINARY="/usr/local/bin/caddy-l4"
+readonly CADDY_L4_CACHE_BINARY="/var/cache/caddyctl/caddy-l4"
 readonly CADDY_L4_SERVICE_DROPIN="/etc/systemd/system/caddy.service.d/caddyctl-l4.conf"
 readonly CADDY_L4_STATE_FILE="/etc/caddy/caddyctl-layer4.tsv"
 readonly CADDY_L4_DISABLED_SITE_SUFFIX=".caddyctl-disabled"
@@ -98,6 +99,48 @@ caddy_l4_binary_has_listener_module() {
   local binary="$1"
   [[ -x "$binary" ]] \
     && "$binary" list-modules 2>/dev/null | grep -Fq 'caddy.listeners.layer4'
+}
+
+caddy_l4_cache_binary() {
+  local source="$1" cache_dir cache_temp
+  caddy_l4_binary_has_listener_module "$source" || return 1
+  cache_dir="$(dirname "$CADDY_L4_CACHE_BINARY")"
+  install -d -m 0755 "$cache_dir" || return 1
+  cache_temp="$(mktemp "${CADDY_L4_CACHE_BINARY}.tmp.XXXXXX")" || return 1
+  if ! install -m 0755 "$source" "$cache_temp" \
+      || ! caddy_l4_binary_has_listener_module "$cache_temp"; then
+    rm -f -- "$cache_temp"
+    return 1
+  fi
+  if ! mv -f -- "$cache_temp" "$CADDY_L4_CACHE_BINARY"; then
+    rm -f -- "$cache_temp"
+    return 1
+  fi
+  caddy_l4_binary_has_listener_module "$CADDY_L4_CACHE_BINARY"
+}
+
+install_caddy_l4_artifact() {
+  local source="$1" target_dir target_temp
+  caddy_l4_binary_has_listener_module "$source" || return 1
+  # Keep the cache before replacing the runtime binary. If the latter fails,
+  # the next invocation can still restore the successfully built artifact.
+  if [[ "$source" != "$CADDY_L4_CACHE_BINARY" ]] \
+      && ! caddy_l4_cache_binary "$source"; then
+    warn "无法写入持久 caddy-l4 缓存，将继续安装当前运行文件。"
+  fi
+  target_dir="$(dirname "$CADDY_L4_BINARY")"
+  install -d -m 0755 "$target_dir" || return 1
+  target_temp="$(mktemp "${CADDY_L4_BINARY}.tmp.XXXXXX")" || return 1
+  if ! install -m 0755 "$source" "$target_temp" \
+      || ! caddy_l4_binary_has_listener_module "$target_temp"; then
+    rm -f -- "$target_temp"
+    return 1
+  fi
+  if ! mv -f -- "$target_temp" "$CADDY_L4_BINARY"; then
+    rm -f -- "$target_temp"
+    return 1
+  fi
+  caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"
 }
 
 caddy_runtime_binary() {
@@ -217,9 +260,9 @@ install_caddy_l4_prebuilt() {
     if download_url_to_file "$download_url" "$temp_binary"; then
       chmod 0755 "$temp_binary"
       if caddy_l4_binary_has_listener_module "$temp_binary"; then
-        if install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
+        if install_caddy_l4_artifact "$temp_binary"; then
           rm -rf -- "$download_dir"
-          success "已安装预编译 caddy-l4。"
+          success "已安装并缓存预编译 caddy-l4。"
           return 0
         fi
         error "预编译 caddy-l4 安装失败。"
@@ -1148,7 +1191,22 @@ install_caddy_l4_binary() {
   local build_parent build_dir temp_binary xcaddy_path go_bin go_bin_dir
 
   if caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"; then
+    if ! caddy_l4_binary_has_listener_module "$CADDY_L4_CACHE_BINARY" \
+        && ! caddy_l4_cache_binary "$CADDY_L4_BINARY"; then
+      warn "当前 caddy-l4 可用，但无法保存到持久缓存。"
+    fi
     return 0
+  fi
+  if [[ -e "$CADDY_L4_CACHE_BINARY" ]]; then
+    if caddy_l4_binary_has_listener_module "$CADDY_L4_CACHE_BINARY"; then
+      if install_caddy_l4_artifact "$CADDY_L4_CACHE_BINARY"; then
+        success "已复用缓存的 caddy-l4，无需重新构建。"
+        return 0
+      fi
+      warn "缓存的 caddy-l4 无法安装，准备重新获取。"
+    else
+      warn "缓存的 caddy-l4 未包含 caddy.listeners.layer4，忽略该缓存。"
+    fi
   fi
   if install_caddy_l4_prebuilt; then
     return 0
@@ -1171,7 +1229,7 @@ install_caddy_l4_binary() {
   temp_binary="${build_dir}/caddy-l4"
   xcaddy_path="$(command -v xcaddy 2>/dev/null || true)"
   if [[ -z "$xcaddy_path" ]]; then
-    info "正在临时构建 xcaddy（构建缓存仅保存在临时目录）..."
+    info "正在临时构建 xcaddy（构建缓存保存在临时目录）..."
     mkdir -p "$build_dir/tmp" "$build_dir/gotmp" || {
       rm -rf -- "$build_dir"; trap - INT TERM; error "无法创建 Go 临时目录。"; return 1
     }
@@ -1195,12 +1253,12 @@ install_caddy_l4_binary() {
   if ! caddy_l4_binary_has_listener_module "$temp_binary"; then
     rm -rf -- "$build_dir"; trap - INT TERM; error "构建结果未包含 caddy.listeners.layer4 模块。"; return 1
   fi
-  if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY" \
-      || ! caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY"; then
+  if ! install_caddy_l4_artifact "$temp_binary"; then
     rm -rf -- "$build_dir"; trap - INT TERM; error "caddy-l4 安装后未检测到 caddy.listeners.layer4 模块。"; return 1
   fi
   rm -rf -- "$build_dir"
   trap - INT TERM
+  success "已安装并缓存 Go 构建的 caddy-l4。"
 }
 
 enable_caddy_l4_service() {
