@@ -179,6 +179,10 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 这样可以避免浏览器协商 HTTP/2 后将 h2 帧转发给 HTTP/1.1 后端而出现
 `ERR_HTTP2_PROTOCOL_ERROR`。Reality SNI 仍按 TCP 原样转发。
 
+选择“关闭 443 端口复用”只会停用 Layer4 分流：状态文件会保留，CaddyCtl 管理的面板站点会移到
+`.caddyctl-disabled` 文件中，不参与普通 Caddy 配置。再次进入选项 `15` 时可直接选择“使用已保存配置重新启用”，
+无需重新填写域名、后端端口或 Reality 映射；“重新初始化”才会重新录入并覆盖保存的配置。
+
 预编译下载只需少量空间。源码构建备用流程会清理旧版本可能遗留的 Go 模块、编译缓存和 `/tmp/go-build*` 临时目录，并自动选择可用空间最大的本地目录；Go 的模块缓存、编译缓存和临时编译目录都会放在该目录，不依赖 `/tmp` 必须有大容量。源码构建时请至少在构建目录所在文件系统预留约 1.5 GiB 可用空间。普通 Caddy 安装不需要 Go，只有初始化 443 端口复用时才执行这一步。
 
 如需固定插件版本或使用镜像，可设置 `CADDYCTL_L4_PLUGIN_VERSION` 和 `CADDYCTL_L4_PREBUILT_URL`；下载地址需要兼容 Caddy 下载 API 的 `os`、`arch` 和 `p` 查询参数。

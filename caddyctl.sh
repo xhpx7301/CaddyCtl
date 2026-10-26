@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.55"
+readonly MANAGER_VERSION="3.3.56"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -24,6 +24,7 @@ readonly LEGACY_MANAGER_COMMAND="/usr/local/bin/caddy"
 readonly CADDY_L4_BINARY="/usr/local/bin/caddy-l4"
 readonly CADDY_L4_SERVICE_DROPIN="/etc/systemd/system/caddy.service.d/caddyctl-l4.conf"
 readonly CADDY_L4_STATE_FILE="/etc/caddy/caddyctl-layer4.tsv"
+readonly CADDY_L4_DISABLED_SITE_SUFFIX=".caddyctl-disabled"
 readonly CADDY_L4_MARKER_BEGIN="# BEGIN CADDYCTL LAYER4"
 readonly CADDY_L4_MARKER_END="# END CADDYCTL LAYER4"
 readonly CADDY_L4_MIN_FREE_KB=1572864
@@ -774,12 +775,8 @@ apply_caddy_l4_state() {
   success "443 SNI 分流配置已应用。"
 }
 
-show_caddy_l4_state() {
+print_caddy_l4_state() {
   local type name host port count
-  if ! caddy_l4_enabled; then
-    warn "443 SNI 分流当前未启用。"
-    return 0
-  fi
   if [[ ! -r "$CADDY_L4_STATE_FILE" ]]; then
     warn "未找到复用状态文件，请检查 $CADDY_L4_STATE_FILE。"
     return 1
@@ -797,6 +794,22 @@ show_caddy_l4_state() {
   if ((count == 0)); then
     printf '  暂无映射，可在“管理 Reality 映射”中添加。\n'
   fi
+}
+
+show_caddy_l4_state() {
+  if ! caddy_l4_enabled; then
+    warn "443 SNI 分流当前未启用。"
+    return 0
+  fi
+  print_caddy_l4_state
+}
+
+show_caddy_l4_saved_state() {
+  if [[ ! -f "$CADDY_L4_STATE_FILE" ]]; then
+    return 1
+  fi
+  printf '\n已保存配置（当前未使用）：\n'
+  print_caddy_l4_state
 }
 
 draw_caddy_l4_header() {
@@ -933,6 +946,91 @@ edit_caddy_l4_panel() {
   cat "$tmp" >"$CADDY_L4_STATE_FILE"; rm -f "$tmp"
   if ! apply_caddy_l4_state "$old_domain"; then cp -a "$state_backup" "$CADDY_L4_STATE_FILE"; rm -f "$state_backup"; return 1; fi
   rm -f "$state_backup"
+}
+
+enable_saved_caddy_l4() {
+  local panel_domain panel_host panel_port target disabled_site site_state site_rollback=""
+  local caddyfile_existed=false site_existed=false dropin_existed=false
+  local snapshot_dir runtime
+
+  [[ -f "$CADDY_L4_STATE_FILE" ]] || {
+    error "没有找到已保存的 443 复用配置，请先初始化。"
+    return 1
+  }
+  IFS=$'\t' read -r panel_domain panel_host panel_port <<<"$(read_caddy_l4_panel)"
+  is_valid_domain "$panel_domain" && is_valid_upstream_host "$panel_host" && is_valid_port "$panel_port" || {
+    error "已保存的面板配置无效，无法重新启用。"
+    return 1
+  }
+  target="$(site_path_for_domain "$panel_domain")"
+  disabled_site="${target}${CADDY_L4_DISABLED_SITE_SUFFIX}"
+  if [[ -f "$target" ]] && ! grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$target"; then
+    error "面板域名已有其他站点配置，拒绝覆盖：$target"
+    return 1
+  fi
+  confirm_action "使用已保存配置重新启用 443 SNI 分流（面板 ${panel_domain}）？" || {
+    info "已取消。"
+    return 0
+  }
+  install_caddy_l4_binary || return 1
+  snapshot_dir="$(mktemp -d)" || return 1
+  if [[ -f "$CADDYFILE" ]]; then
+    caddyfile_existed=true
+    cp -a "$CADDYFILE" "${snapshot_dir}/Caddyfile" || { rm -rf -- "$snapshot_dir"; return 1; }
+  fi
+  if [[ -f "$target" ]]; then
+    site_existed=true
+    cp -a "$target" "${snapshot_dir}/panel.caddy" || { rm -rf -- "$snapshot_dir"; return 1; }
+  fi
+  if [[ -f "$CADDY_L4_SERVICE_DROPIN" ]]; then
+    dropin_existed=true
+    cp -a "$CADDY_L4_SERVICE_DROPIN" "${snapshot_dir}/caddyctl-l4.conf" || { rm -rf -- "$snapshot_dir"; return 1; }
+  fi
+  initialize_caddyfile || { rm -rf -- "$snapshot_dir"; return 1; }
+  if [[ -f "$disabled_site" ]] && grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$disabled_site"; then
+    site_state=""
+    install -m 0644 "$disabled_site" "$target" && site_state=restored
+  else
+    site_state="$(write_caddy_l4_panel_site "$panel_domain" "$panel_host" "$panel_port")" || site_state=""
+    IFS=$'\t' read -r _ site_rollback <<<"$site_state"
+    [[ -z "$site_rollback" ]] || rm -f -- "$site_rollback"
+  fi
+  if [[ -z "$site_state" ]] \
+      || ! write_caddy_l4_block "$panel_domain" "$(format_upstream_host "$panel_host"):${panel_port}" \
+      || ! enable_caddy_l4_service; then
+    error "重新启用配置失败，正在恢复。"
+    remove_caddy_l4_block >/dev/null 2>&1 || true
+    disable_caddy_l4_service >/dev/null 2>&1 || true
+    if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
+    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; else rm -f -- "$target"; fi
+    if [[ "$dropin_existed" == true ]]; then
+      install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"
+      cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    rm -rf -- "$snapshot_dir"
+    return 1
+  fi
+  runtime="$(caddy_runtime_binary)"
+  if ! validate_caddy_config "$runtime" || ! systemctl restart caddy; then
+    error "重新启用后的配置校验或重启失败，正在恢复。"
+    remove_caddy_l4_block >/dev/null 2>&1 || true
+    disable_caddy_l4_service >/dev/null 2>&1 || true
+    if [[ "$caddyfile_existed" == true ]]; then cp -a "${snapshot_dir}/Caddyfile" "$CADDYFILE"; else rm -f -- "$CADDYFILE"; fi
+    if [[ "$site_existed" == true ]]; then cp -a "${snapshot_dir}/panel.caddy" "$target"; else rm -f -- "$target"; fi
+    if [[ "$dropin_existed" == true ]]; then
+      install -d -m 0755 "$(dirname "$CADDY_L4_SERVICE_DROPIN")"
+      cp -a "${snapshot_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart caddy >/dev/null 2>&1 || true
+    rm -rf -- "$snapshot_dir"
+    return 1
+  fi
+  rm -f -- "$disabled_site"
+  rm -rf -- "$snapshot_dir"
+  success "已使用保存的配置重新启用 443 SNI 分流。"
+  print_caddy_l4_state
 }
 
 install_caddy_l4_binary() {
@@ -1152,12 +1250,12 @@ configure_caddy_l4() {
 }
 
 disable_caddy_l4() {
-  local runtime temp_dir site_backup_dir panel_site had_dropin=false temp_file
+  local runtime temp_dir site_backup_dir panel_site disabled_panel_site="" had_dropin=false temp_file
   if ! caddy_l4_enabled; then
     warn "当前未检测到 CaddyCtl 管理的 caddy-l4 配置。"
     return 0
   fi
-  confirm_action "确认关闭 443 SNI 分流并恢复官方 Caddy 服务？" || { info "已取消。"; return 0; }
+  confirm_action "确认停用 443 SNI 分流并恢复官方 Caddy 服务（保留面板和 Reality 设置）？" || { info "已取消。"; return 0; }
   temp_dir="$(mktemp -d)" || return 1
   site_backup_dir="${temp_dir}/sites"
   mkdir -p "$site_backup_dir"
@@ -1170,6 +1268,9 @@ disable_caddy_l4() {
     [[ -f "$panel_site" ]] || continue
     if grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$panel_site"; then
       cp -a -- "$panel_site" "$site_backup_dir/$(basename "$panel_site")" || { rm -rf -- "$temp_dir"; return 1; }
+      disabled_panel_site="${panel_site}${CADDY_L4_DISABLED_SITE_SUFFIX}"
+      backup_file "$panel_site" "$(basename "$panel_site").before-layer4-disable" \
+        && cp -a -- "$panel_site" "$disabled_panel_site" || { rm -rf -- "$temp_dir"; return 1; }
     fi
   done
   temp_file="${temp_dir}/Caddyfile.new"
@@ -1193,6 +1294,7 @@ disable_caddy_l4() {
       cp -a "${temp_dir}/caddyctl-l4.conf" "$CADDY_L4_SERVICE_DROPIN"
     fi
     cp -a "$site_backup_dir"/. "$SITES_DIR"/ 2>/dev/null || true
+    [[ -z "$disabled_panel_site" ]] || rm -f -- "$disabled_panel_site"
     systemctl daemon-reload
     systemctl restart caddy >/dev/null 2>&1 || true
     rm -rf -- "$temp_dir"
@@ -1200,6 +1302,7 @@ disable_caddy_l4() {
   fi
   rm -rf -- "$temp_dir"
   success "443 SNI 分流已关闭，Caddy 已恢复使用官方二进制。"
+  info "原面板与 Reality 映射已保留在 $CADDY_L4_STATE_FILE。面板站点已移至 ${disabled_panel_site:-站点目录}，当前不参与 Caddy 配置。"
 }
 
 caddy_l4_menu() {
@@ -1226,6 +1329,23 @@ caddy_l4_menu() {
         *) error '无效选项，请输入 0-4。'; pause_menu '443 端口复用菜单' ;;
       esac
     else
+      if [[ -f "$CADDY_L4_STATE_FILE" ]]; then
+        show_caddy_l4_saved_state
+        printf '\n说明：当前复用未使用，保存的面板和 Reality 映射可重新启用。\n'
+        printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+        printf '  1. 使用已保存配置重新启用\n'
+        printf '  2. 重新初始化面板入口和 Reality 映射\n'
+        printf '  0. 返回主菜单\n'
+        printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
+        read -r -p '请选择操作 [0-2]：' choice || return 0
+        case "$choice" in
+          1) enable_saved_caddy_l4; pause_menu '443 端口复用菜单' ;;
+          2) configure_caddy_l4; pause_menu '443 端口复用菜单' ;;
+          0) return 0 ;;
+          *) error '无效选项，请输入 0-2。'; pause_menu '443 端口复用菜单' ;;
+        esac
+        continue
+      fi
       printf '\n说明：面板 HTTPS 和 Reality 共用公网 TCP 443。\n'
       printf '      面板后端使用 HTTP，Reality 后端保留高位端口。\n'
       printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"

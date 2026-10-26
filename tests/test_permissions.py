@@ -125,6 +125,66 @@ if reload_validated_config; then exit 1; fi
 [[ ! -f "$CADDY_CONFIG_DIR/../systemctl.log" ]]
 ''')
 
+    def test_resume_saved_configuration_and_rollback(self):
+        for mode in ("saved_site", "legacy", "invalid", "conflict", "restart_failure"):
+            with self.subTest(mode=mode):
+                self.run_shell('''
+initialize_caddyfile
+printf 'P\\tpanel.example\\t127.0.0.1\\t20534\\nR\\treality.example\\t127.0.0.1\\t15443\\nR\\tsecond.example\\t127.0.0.1\\t25443\\n' >"$CADDY_L4_STATE_FILE"
+chmod 0600 "$CADDY_L4_STATE_FILE"
+cp -a "$CADDY_L4_STATE_FILE" "$CADDY_CONFIG_DIR/state.original"
+cp -a "$CADDYFILE" "$CADDY_CONFIG_DIR/config.original"
+confirm_action() { return 0; }
+install_caddy_l4_binary() { return 0; }
+caddy_runtime_binary() { echo "$REAL_CADDY"; }
+''' + ('''
+cat >"$SITES_DIR/panel.example.caddy.caddyctl-disabled" <<'EOF'
+# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。
+panel.example {
+    # custom settings retained
+    reverse_proxy http://127.0.0.1:20534
+}
+EOF
+''' if mode != "legacy" else "") + ('''
+echo private >"$SITES_DIR/private.caddy"
+chmod 0600 "$SITES_DIR/private.caddy"
+''' if mode == "invalid" else "") + ('''
+echo 'user site' >"$SITES_DIR/panel.example.caddy"
+''' if mode == "conflict" else "") + ('''
+eval "$(declare -f systemctl | sed '1s/systemctl/saved_systemctl/')"
+systemctl() {
+  if [[ "$*" == 'restart caddy' ]]; then return 1; fi
+  saved_systemctl "$@"
+}
+''' if mode == "restart_failure" else "") + ('''
+if enable_saved_caddy_l4; then exit 1; fi
+! caddy_l4_enabled
+cmp "$CADDYFILE" "$CADDY_CONFIG_DIR/config.original"
+[[ -f "$SITES_DIR/panel.example.caddy.caddyctl-disabled" ]]
+''' if mode in ("invalid", "conflict", "restart_failure") else '''
+enable_saved_caddy_l4
+caddy_l4_enabled
+[[ -f "$SITES_DIR/panel.example.caddy" ]]
+[[ ! -f "$SITES_DIR/panel.example.caddy.caddyctl-disabled" ]]
+grep -q 'second.example' "$CADDYFILE"
+''') + '''
+cmp "$CADDY_L4_STATE_FILE" "$CADDY_CONFIG_DIR/state.original"
+[[ "$(stat -c '%a' "$CADDY_L4_STATE_FILE")" == 600 ]]
+''')
+
+    def test_disabled_menu_shows_saved_config_and_reenable_choice(self):
+        self.run_shell('''
+initialize_caddyfile
+printf 'P\\tpanel.example\\t127.0.0.1\\t20534\\nR\\treality.example\\t127.0.0.1\\t15443\\n' >"$CADDY_L4_STATE_FILE"
+chmod 0600 "$CADDY_L4_STATE_FILE"
+service_value() { echo inactive; }
+output="$(caddy_l4_menu <<<0)"
+[[ "$output" == *'443 复用：未启用 | Caddy：未运行'* ]]
+[[ "$output" == *'已保存配置（当前未使用）'* ]]
+[[ "$output" == *'使用已保存配置重新启用'* ]]
+[[ "$output" == *'https://panel.example -> http://127.0.0.1:20534'* ]]
+''')
+
     def test_disable_and_failed_disable_rollback(self):
         for fail in (False, True):
             with self.subTest(failed_validation=fail):
@@ -133,6 +193,12 @@ initialize_caddyfile
 chmod 0640 "$CADDYFILE"
 printf 'R\\treality.example\\t127.0.0.1\\t15443\\n' >"$CADDY_L4_STATE_FILE"
 write_caddy_l4_block panel.example 127.0.0.1:20534
+cat >"$SITES_DIR/panel.example.caddy" <<'EOF'
+# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。
+panel.example {
+    reverse_proxy http://127.0.0.1:20534
+}
+EOF
 install -d "$(dirname "$CADDY_L4_SERVICE_DROPIN")"
 echo "$CADDY_L4_BINARY run" >"$CADDY_L4_SERVICE_DROPIN"
 cp -a "$CADDYFILE" "$CADDY_CONFIG_DIR/original"
@@ -148,6 +214,9 @@ rm "$SITES_DIR/private.caddy"
 disable_caddy_l4
 [[ ! -f "$CADDY_L4_SERVICE_DROPIN" ]]
 ! grep -q 'listener_wrappers' "$CADDYFILE"
+[[ -f "$CADDY_L4_STATE_FILE" ]]
+[[ -f "$SITES_DIR/panel.example.caddy.caddyctl-disabled" ]]
+[[ ! -f "$SITES_DIR/panel.example.caddy" ]]
 ''') + '''
 [[ "$(stat -c '%U:%G:%a' "$CADDYFILE")" == root:nogroup:640 ]]
 ''')
