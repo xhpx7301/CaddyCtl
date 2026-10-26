@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.49"
+readonly MANAGER_VERSION="3.3.50"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -108,13 +108,26 @@ filesystem_free_kb() {
   df -Pk "$path" 2>/dev/null | awk 'NR == 2 {print $4}'
 }
 
+choose_caddy_l4_build_parent() {
+  local candidate free best_path="" best_free=0
+  for candidate in /var/cache/caddyctl /var/lib/caddyctl /usr/local/lib/caddyctl /root; do
+    mkdir -p -- "$candidate" 2>/dev/null || continue
+    free="$(filesystem_free_kb "$candidate")"
+    [[ "$free" =~ ^[0-9]+$ ]] || continue
+    if (( free > best_free )); then
+      best_free="$free"
+      best_path="$candidate"
+    fi
+  done
+  [[ -n "$best_path" ]] || return 1
+  printf '%s\n' "$best_path"
+}
+
 check_caddy_l4_build_space() {
-  local root_free tmp_free
-  root_free="$(filesystem_free_kb /usr/local/bin)"
-  tmp_free="$(filesystem_free_kb /tmp)"
-  if [[ ! "$root_free" =~ ^[0-9]+$ || ! "$tmp_free" =~ ^[0-9]+$ ]] \
-      || (( root_free < CADDY_L4_MIN_FREE_KB || tmp_free < CADDY_L4_MIN_FREE_KB )); then
-    error "构建 caddy-l4 前至少需要约 1.5 GiB 可用空间；当前 /usr/local/bin 可用 ${root_free:-未知} KiB，/tmp 可用 ${tmp_free:-未知} KiB。请先清理磁盘后重试。"
+  local build_parent="$1" free
+  free="$(filesystem_free_kb "$build_parent")"
+  if [[ ! "$free" =~ ^[0-9]+$ ]] || (( free < CADDY_L4_MIN_FREE_KB )); then
+    error "构建 caddy-l4 前至少需要约 1.5 GiB 可用空间；构建目录所在文件系统可用 ${free:-未知} KiB。请先清理磁盘后重试。"
     return 1
   fi
 }
@@ -734,14 +747,18 @@ edit_caddy_l4_panel() {
 }
 
 install_caddy_l4_binary() {
-  local package_manager build_dir temp_binary xcaddy_path
+  local package_manager build_parent build_dir temp_binary xcaddy_path
 
   if [[ -x "$CADDY_L4_BINARY" ]] \
       && "$CADDY_L4_BINARY" list-modules 2>/dev/null | grep -Fq 'layer4'; then
     return 0
   fi
   cleanup_caddy_l4_build_cache
-  check_caddy_l4_build_space || return 1
+  build_parent="$(choose_caddy_l4_build_parent)" || {
+    error "找不到可用的本地构建目录。"
+    return 1
+  }
+  check_caddy_l4_build_space "$build_parent" || return 1
   if ! command -v go >/dev/null 2>&1; then
     package_manager="$(detect_package_manager)"
     case "$package_manager" in
@@ -763,7 +780,8 @@ install_caddy_l4_binary() {
     error "Go 安装后仍不可用，无法构建带 caddy-l4 的 Caddy。"
     return 1
   fi
-  build_dir="$(mktemp -d /tmp/caddyctl-l4-build.XXXXXX)" || return 1
+  build_dir="$(mktemp -d "${build_parent}/caddyctl-l4-build.XXXXXX")" || return 1
+  trap 'rm -rf -- "$build_dir"; exit 130' INT TERM
   temp_binary="${build_dir}/caddy-l4"
   xcaddy_path="$(command -v xcaddy 2>/dev/null || true)"
   if [[ -z "$xcaddy_path" ]]; then
@@ -771,6 +789,7 @@ install_caddy_l4_binary() {
     if ! GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" GOBIN="${build_dir}/bin" \
       go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest; then
       rm -rf -- "$build_dir"
+      trap - INT TERM
       error "xcaddy 构建失败。"
       return 1
     fi
@@ -778,6 +797,7 @@ install_caddy_l4_binary() {
   fi
   if [[ ! -x "$xcaddy_path" ]]; then
     rm -rf -- "$build_dir"
+    trap - INT TERM
     error "xcaddy 不可用。"
     return 1
   fi
@@ -785,19 +805,23 @@ install_caddy_l4_binary() {
   if ! GOPATH="${build_dir}/gopath" GOMODCACHE="${build_dir}/modcache" GOCACHE="${build_dir}/gocache" \
       "$xcaddy_path" build --output "$temp_binary" --with github.com/mholt/caddy-l4; then
     rm -rf -- "$build_dir"
+    trap - INT TERM
     error "caddy-l4 构建失败。"
     return 1
   fi
   if ! "$temp_binary" list-modules 2>/dev/null | grep -Fq 'layer4'; then
     rm -rf -- "$build_dir"
+    trap - INT TERM
     error "构建结果未包含 layer4 模块。"
     return 1
   fi
   if ! install -m 0755 "$temp_binary" "$CADDY_L4_BINARY"; then
     rm -rf -- "$build_dir"
+    trap - INT TERM
     return 1
   fi
   rm -rf -- "$build_dir"
+  trap - INT TERM
 }
 
 enable_caddy_l4_service() {
