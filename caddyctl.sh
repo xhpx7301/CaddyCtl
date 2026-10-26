@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.65"
+readonly MANAGER_VERSION="3.3.66"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -102,20 +102,31 @@ caddy_l4_binary_has_listener_module() {
 }
 
 caddy_l4_cache_binary() {
-  local source="$1" cache_dir cache_temp
+  local source="$1" cache_dir cache_temp_dir cache_temp
   caddy_l4_binary_has_listener_module "$source" || return 1
   cache_dir="$(dirname "$CADDY_L4_CACHE_BINARY")"
   install -d -m 0755 "$cache_dir" || return 1
-  cache_temp="$(mktemp "${CADDY_L4_CACHE_BINARY}.tmp.XXXXXX")" || return 1
-  if ! install -m 0755 "$source" "$cache_temp" \
+  cache_temp_dir="$(mktemp -d "${cache_dir}/.caddy-l4-cache.XXXXXX")" || return 1
+  cache_temp="${cache_temp_dir}/caddy-l4"
+  # The build directory is normally under /var/cache/caddyctl as well. A
+  # hard link avoids another full binary-sized write on small disks; fall back
+  # to a normal copy when the source is on a different filesystem.
+  if ! ln "$source" "$cache_temp" 2>/dev/null; then
+    if ! install -m 0755 "$source" "$cache_temp"; then
+      rm -rf -- "$cache_temp_dir"
+      return 1
+    fi
+  fi
+  if ! chmod 0755 "$cache_temp" \
       || ! caddy_l4_binary_has_listener_module "$cache_temp"; then
-    rm -f -- "$cache_temp"
+    rm -rf -- "$cache_temp_dir"
     return 1
   fi
   if ! mv -f -- "$cache_temp" "$CADDY_L4_CACHE_BINARY"; then
-    rm -f -- "$cache_temp"
+    rm -rf -- "$cache_temp_dir"
     return 1
   fi
+  rmdir -- "$cache_temp_dir" 2>/dev/null || true
   caddy_l4_binary_has_listener_module "$CADDY_L4_CACHE_BINARY"
 }
 
