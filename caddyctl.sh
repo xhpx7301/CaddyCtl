@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.63"
+readonly MANAGER_VERSION="3.3.64"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -108,11 +108,15 @@ caddy_runtime_binary() {
   fi
 }
 
-caddy_l4_enabled() {
-  caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY" \
-    && [[ -f "$CADDY_L4_SERVICE_DROPIN" ]] \
+caddy_l4_config_present() {
+  [[ -f "$CADDY_L4_SERVICE_DROPIN" ]] \
     && grep -Fq "$CADDY_L4_BINARY run" "$CADDY_L4_SERVICE_DROPIN" \
     && grep -Fq "$CADDY_L4_MARKER_BEGIN" "$CADDYFILE" 2>/dev/null
+}
+
+caddy_l4_enabled() {
+  caddy_l4_binary_has_listener_module "$CADDY_L4_BINARY" \
+    && caddy_l4_config_present
 }
 
 filesystem_free_kb() {
@@ -1316,7 +1320,7 @@ configure_caddy_l4() {
 
 disable_caddy_l4() {
   local runtime temp_dir site_backup_dir panel_site disabled_panel_site="" had_dropin=false temp_file
-  if ! caddy_l4_enabled; then
+  if ! caddy_l4_config_present; then
     warn "当前未检测到 CaddyCtl 管理的 caddy-l4 配置。"
     return 0
   fi
@@ -1370,6 +1374,40 @@ disable_caddy_l4() {
   info "原面板与 Reality 映射已保留在 $CADDY_L4_STATE_FILE。面板站点已移至 ${disabled_panel_site:-站点目录}，当前不参与 Caddy 配置。"
 }
 
+delete_caddy_l4_config() {
+  local site
+  if ! caddy_l4_config_present && [[ ! -f "$CADDY_L4_STATE_FILE" ]]; then
+    warn "当前没有可删除的 443 复用配置。"
+    return 0
+  fi
+  if caddy_l4_config_present; then
+    info "当前存在 443 复用配置，删除前需要先关闭复用。"
+    disable_caddy_l4 || return 1
+    if caddy_l4_enabled; then
+      info "已取消关闭操作，未删除任何配置。"
+      return 0
+    fi
+  fi
+  [[ -f "$CADDY_L4_STATE_FILE" ]] || {
+    warn "443 复用已关闭，未找到保存的配置。"
+    return 0
+  }
+  confirm_action "确认永久删除已保存的面板和 Reality 映射？删除后无法一键恢复" || {
+    info "已取消。"
+    return 0
+  }
+  backup_file "$CADDY_L4_STATE_FILE" "layer4-state-before-delete"
+  rm -f -- "$CADDY_L4_STATE_FILE"
+  for site in "$SITES_DIR"/*"$CADDY_L4_DISABLED_SITE_SUFFIX"; do
+    [[ -f "$site" ]] || continue
+    if grep -Fq '# 由 CaddyCtl 管理：443 SNI 分流后的 3x-ui 面板入口。' "$site"; then
+      backup_file "$site" "$(basename "$site").before-layer4-delete"
+      rm -f -- "$site"
+    fi
+  done
+  success "443 复用配置已删除，当前恢复为未配置状态。"
+}
+
 caddy_l4_menu() {
   local choice
   while true; do
@@ -1385,17 +1423,19 @@ caddy_l4_menu() {
         printf '  2. 配置面板映射（当前未启用）\n'
       fi
       printf '  3. 校验并应用当前配置\n'
-      printf '  4. 关闭 443 端口复用\n'
+      printf '  4. 关闭 443 端口复用（保留配置）\n'
+      printf '  5. 删除 443 复用配置\n'
       printf '  0. 返回主菜单\n'
       printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
-      read -r -p '请选择操作 [0-4]：' choice || return 0
+      read -r -p '请选择操作 [0-5]：' choice || return 0
       case "$choice" in
         1) manage_caddy_l4_reality ;;
         2) if state_has_panel; then edit_caddy_l4_panel; else add_caddy_l4_panel; fi; pause_menu '443 端口复用菜单' ;;
         3) apply_caddy_l4_state; pause_menu '443 端口复用菜单' ;;
         4) disable_caddy_l4; pause_menu '443 端口复用菜单' ;;
+        5) delete_caddy_l4_config; pause_menu '443 端口复用菜单' ;;
         0) return 0 ;;
-        *) error '无效选项，请输入 0-4。'; pause_menu '443 端口复用菜单' ;;
+        *) error '无效选项，请输入 0-5。'; pause_menu '443 端口复用菜单' ;;
       esac
     else
       if [[ -f "$CADDY_L4_STATE_FILE" ]]; then
@@ -1404,14 +1444,16 @@ caddy_l4_menu() {
         printf '\n%s--------------------------------------------%s\n' "$BLUE" "$RESET"
         printf '  1. 使用已保存配置重新启用\n'
         printf '  2. 重新初始化映射\n'
+        printf '  3. 删除已保存配置\n'
         printf '  0. 返回主菜单\n'
         printf '%s--------------------------------------------%s\n' "$BLUE" "$RESET"
-        read -r -p '请选择操作 [0-2]：' choice || return 0
+        read -r -p '请选择操作 [0-3]：' choice || return 0
         case "$choice" in
           1) enable_saved_caddy_l4; pause_menu '443 端口复用菜单' ;;
           2) configure_caddy_l4; pause_menu '443 端口复用菜单' ;;
+          3) delete_caddy_l4_config; pause_menu '443 端口复用菜单' ;;
           0) return 0 ;;
-          *) error '无效选项，请输入 0-2。'; pause_menu '443 端口复用菜单' ;;
+          *) error '无效选项，请输入 0-3。'; pause_menu '443 端口复用菜单' ;;
         esac
         continue
       fi
