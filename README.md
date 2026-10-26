@@ -169,6 +169,8 @@ export CADDYCTL_SOURCE_URL="https://example.com/path/caddyctl.sh"
 可以在主菜单选择 `15`，再选择初始化。向导会构建带 `github.com/mholt/caddy-l4` 的 Caddy，生成按 SNI
 分流的 Layer4 listener wrapper。后续可在二级菜单中查看、添加、修改或删除 Reality 映射，或者修改面板域名及 HTTP 后端；每个 SNI 对应一个后端地址和端口。面板域名的 TLS 会在 Caddy 中终止，再以普通 HTTP 访问 3x-ui，例如：
 
+构建前会清理旧版本可能遗留的 Go 模块和编译缓存，并把本次构建的缓存隔离在临时目录中；请至少预留约 1.5 GiB 可用空间。构建完成或失败后，临时目录都会删除。
+
 ```text
 面板域名:443 -> caddy-l4（Caddy 终止 TLS） -> http://127.0.0.1:20534
 reality-a.example:443 -> caddy-l4（保持原始 TLS） -> 127.0.0.1:15443
