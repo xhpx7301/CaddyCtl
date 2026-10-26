@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.59"
+readonly MANAGER_VERSION="3.3.60"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -1837,6 +1837,10 @@ save_proxy_config() {
   fi
   if [[ "$upstream_scheme" != "http" && "$upstream_scheme" != "https" ]]; then
     error "后端服务协议只能是 http 或 https。"
+    return 1
+  fi
+  if caddy_l4_enabled && [[ -f "$CADDY_L4_STATE_FILE" ]]       && awk -F '\t' -v d="$domain" '$1 == "P" && $2 == d {found=1} $1 == "R" && $2 == d {found=1} END {exit !found}' "$CADDY_L4_STATE_FILE"; then
+    error "域名 ${domain} 已被 443 复用的面板或 Reality SNI 占用，请使用其他域名。"
     return 1
   fi
 
