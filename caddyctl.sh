@@ -7,7 +7,7 @@
 set -uo pipefail
 
 readonly PROJECT_NAME="CaddyCtl"
-readonly MANAGER_VERSION="3.3.66"
+readonly MANAGER_VERSION="3.3.67"
 readonly MANAGER_SOURCE_URL="${CADDYCTL_SOURCE_URL:-https://raw.githubusercontent.com/xhpx7301/CaddyCtl/main/caddyctl.sh}"
 readonly REAL_CADDY="/usr/bin/caddy"
 readonly CADDYFILE="/etc/caddy/Caddyfile"
@@ -97,8 +97,10 @@ require_root() {
 
 caddy_l4_binary_has_listener_module() {
   local binary="$1"
+  # Do not use grep -q with pipefail here: grep would close the pipe early,
+  # causing Caddy to receive SIGPIPE and making a valid binary look invalid.
   [[ -x "$binary" ]] \
-    && "$binary" list-modules 2>/dev/null | grep -Fq 'caddy.listeners.layer4'
+    && "$binary" list-modules 2>/dev/null | grep -F 'caddy.listeners.layer4' >/dev/null
 }
 
 caddy_l4_cache_binary() {
