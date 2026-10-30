@@ -2652,6 +2652,9 @@ format_listener_table() {
         }
       }
       row_count++
+      # Keep the original order for rows that share a port while sorting
+      # the complete table numerically by the local listening port.
+      port_sort[row_count] = port + 0
       field[row_count, 1] = $1
       field[row_count, 2] = $2
       field[row_count, 3] = $3
@@ -2682,6 +2685,30 @@ format_listener_table() {
       }
       print_table_header()
       for (row = 1; row <= row_count; row++) {
+        min_row = row
+        for (candidate = row + 1; candidate <= row_count; candidate++) {
+          if (port_sort[candidate] < port_sort[min_row]) {
+            min_row = candidate
+          }
+        }
+        if (min_row != row) {
+          temp_port = port_sort[row]
+          port_sort[row] = port_sort[min_row]
+          port_sort[min_row] = temp_port
+          if (listener_command == "netstat") {
+            for (i = 1; i <= 8; i++) {
+              temp_field = field[row, i]
+              field[row, i] = field[min_row, i]
+              field[min_row, i] = temp_field
+            }
+          } else {
+            for (i = 1; i <= 7; i++) {
+              temp_field = field[row, i]
+              field[row, i] = field[min_row, i]
+              field[min_row, i] = temp_field
+            }
+          }
+        }
         if (listener_command == "netstat") {
           for (i = 1; i <= 7; i++) {
             print_data_field(field[row, i], width[i])
